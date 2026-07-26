@@ -57,22 +57,30 @@ static int approach_ticks_for(int planet) {
 #define PK_COLLECT  2
 #define PK_BESTSCORE 3
 #define PK_SECRET   4
-#define PK_BACKLIGHT 5
+#define PK_BACKLIGHT 5      // legacy bool; superseded by PK_BL_MODE
 #define PK_JAM      6
 #define PK_RUMBLE   7
-#define PK_SOUND    8
+#define PK_SOUND    8          // legacy on/off bool; superseded by PK_SOUND_VOL
+#define PK_BL_MODE  9
+#define PK_SOUND_VOL 10
 
-#define BACKLIGHT_TIMEOUT_MS 60000
+#define BL_TIMEOUT_MS 30000
 
-// Landscape -> native helpers.
-static GRect ls(int u, int v, int w, int h) { return GRect(v, 228 - u - w, h, w); }
-static GPoint lp(int u, int v) { return GPoint(v, 228 - u - 1); }
+// Landscape -> native helpers. s_native_h is the real screen height, cached in
+// window_load: everything else in this file derives from layer_get_bounds(), and
+// these two were the only place a 228 was baked in.
+static int16_t s_native_h = 228;
+static GRect ls(int u, int v, int w, int h) { return GRect(v, s_native_h - u - w, h, w); }
+static GPoint lp(int u, int v) { return GPoint(v, s_native_h - u - 1); }
 
 typedef enum {
   ST_TITLE, ST_MAP, ST_PLAYING, ST_PAUSED, ST_UPGRADE, ST_GAMEOVER, ST_VICTORY,
   ST_SECRET_ENDING, ST_SETTINGS
 } GameState;
 typedef enum { PH_APPROACH, PH_BOSS_INTRO, PH_BOSS, PH_CLEARED } Phase;
+// Backlight: off (system default), timeout (lit while interacting, then dims),
+// or always (forced 100% on). Mirrors Switchback's 3-state model.
+typedef enum { BL_OFF, BL_TIMED, BL_ALWAYS, NUM_BL_MODES } BacklightMode;
 typedef enum { EN_NONE, EN_DRONE, EN_FIGHTER, EN_MINE, EN_COLLECT, EN_ACID, EN_TURRET } EnemyKind;
 typedef enum { UP_TIMELINE, UP_ARMOR, UP_SHIELD, UP_REBBLE, NUM_UPGRADES } UpgradeType;
 
@@ -128,6 +136,8 @@ enum {
   S_UD_TIMELINE, S_UD_ARMOR, S_UD_SHIELD, S_UD_REBBLE,
   S_SETTINGS, S_BACKLIGHT, S_WEAPON_JAM, S_RUMBLE, S_SOUND, S_RESET,
   S_RESET_CONFIRM, S_ON, S_OFF, S_SET_HINT, S_TITLE_SETTINGS,
+  S_BL_TIMED, S_BL_ALWAYS,
+  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD,
   NUM_STRS
 };
 
@@ -145,6 +155,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Faster fire", "+2 max HP", "Blocks 1 hit/level", "Faster bomb charge",
     "SETTINGS", "Backlight", "Weapon Jam", "Rumble", "Sound", "Reset Save",
     "Press again to erase", "On", "Off", "UP/DOWN  SELECT toggle", "UP  settings",
+    "Timeout", "Always",
+    "Soft", "Normal", "Loud",
   },
   [L_NL] = {
     "BRENG DE TIME CORE NAAR AARDE", "Aardes laatste hoop", "SELECT  start",
@@ -159,6 +171,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Sneller vuren", "+2 max HP", "Blokt 1 hit/level", "Snellere bomlading",
     "INSTELLINGEN", "Verlichting", "Wapenstoring", "Trillen", "Geluid", "Wissen",
     "Nogmaals om te wissen", "Aan", "Uit", "UP/DOWN  SELECT wisselen", "UP  instellingen",
+    "Time-out", "Altijd",
+    "Zacht", "Normaal", "Luid",
   },
   [L_FR] = {
     "LIVREZ LE TIME CORE À LA TERRE", "Dernier espoir", "SELECT  jouer",
@@ -173,6 +187,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Tir plus rapide", "+2 PV max", "Bloque 1 coup/niv", "Bombe plus vite",
     "RÉGLAGES", "Éclairage", "Enrayage", "Vibration", "Son", "Effacer",
     "Encore pour effacer", "Activé", "Désactivé", "UP/DOWN  SELECT changer", "UP  réglages",
+    "Minuteur", "Toujours",
+    "Doux", "Normal", "Fort",
   },
   [L_DE] = {
     "BRING DEN TIME CORE ZUR ERDE", "Letzte Hoffnung", "SELECT  Start",
@@ -187,6 +203,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Schneller feuern", "+2 max LP", "Blockt 1 Treffer", "Bombe lädt schneller",
     "EINSTELLUNGEN", "Beleuchtung", "Ladehemmung", "Vibration", "Ton", "Löschen",
     "Nochmal zum Löschen", "An", "Aus", "UP/DOWN  SELECT ändern", "UP  Optionen",
+    "Zeitlimit", "Immer",
+    "Leise", "Normal", "Laut",
   },
   [L_ES] = {
     "LLEVA EL TIME CORE A LA TIERRA", "Última esperanza", "SELECT  jugar",
@@ -201,6 +219,8 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "Disparo rápido", "+2 PV máx", "Bloquea 1 golpe", "Bomba más rápida",
     "AJUSTES", "Luz", "Atasco", "Vibración", "Sonido", "Borrar",
     "Otra vez para borrar", "Sí", "No", "UP/DOWN  SELECT cambiar", "UP  ajustes",
+    "Con tiempo", "Siempre",
+    "Bajo", "Normal", "Alto",
   },
 };
 
@@ -248,10 +268,10 @@ static int16_t s_heat;   // weapon heat — builds while firing
 static int16_t s_jam;    // ticks the gun is jammed (can't fire)
 
 // settings (persisted)
-static bool s_backlight_on;
+static int8_t s_bl_mode = BL_OFF; // BacklightMode
 static bool s_jam_on = true;      // false = easy mode, weapon never jams
 static bool s_rumble_on = true;
-static bool s_sound_on = true;    // reserved for future sound effects
+static int8_t s_sound_vol = 1;    // 0=Off 1=Soft 2=Normal 3=Loud (chiptune SFX)
 static int8_t s_set_sel;          // settings-menu row
 static bool s_reset_armed;        // "Reset Save" needs a confirming second press
 static AppTimer *s_backlight_timer;
@@ -370,6 +390,18 @@ static void draw_text_center(GContext *ctx, const char *s, int16_t cu, int16_t v
   draw_text_ls(ctx, s, cu - text_w_ls(s, big) / 2, v, big, col);
 }
 
+// Centre a heading in the big font, dropping to the small one when the big
+// would run off the screen. draw_text_center does not clip -- it just starts
+// drawing off-screen at both ends -- so a long translation loses characters
+// from both sides. Wrapping is not an option for these: several are a single
+// word ("¡ENHORABUENA!", "GEPAUZEERD") with no space to break at. The v nudge
+// keeps the shrunk line optically where the big one sat.
+static void draw_text_center_fit(GContext *ctx, const char *s, int16_t cu, int16_t v,
+                                 GColor col) {
+  bool big = text_w_ls(s, true) <= s_wls - 6;
+  draw_text_center(ctx, s, cu, big ? v : v + (FONT_B_H - FONT_S_H) / 2, big, col);
+}
+
 // Centre text, wrapping onto a second line at the middle-most space if it is
 // too wide for the screen (keeps long localised strings on-screen). Returns the
 // v of the line below what was drawn.
@@ -398,19 +430,66 @@ static void vibe_short(void) { if (s_rumble_on) vibes_short_pulse(); }
 static void vibe_long(void)  { if (s_rumble_on) vibes_long_pulse(); }
 static void vibe_double(void){ if (s_rumble_on) vibes_double_pulse(); }
 
+// ---------------------------------------------------------------------------
+// Sound effects (PT2 speaker). Short chiptune blips, all gated by the Sound
+// setting. MIDI notes: 60 = C4; velocity 0 = use the call's global volume.
+// ---------------------------------------------------------------------------
+#define SFX_VOL 80
+#define SFX_N(a) (sizeof(a) / sizeof((a)[0]))
+#define SQ SpeakerWaveformSquare
+
+static const SpeakerNote SFX_COLLECT[] = {{81, SQ, 45, 0, 0}, {86, SQ, 45, 0, 0}, {93, SQ, 120, 0, 0}}; // rising jingle
+static const SpeakerNote SFX_BOMB[]    = {{72, SQ, 40, 0, 0}, {60, SQ, 60, 0, 0}, {48, SQ, 150, 0, 0}};  // heavy sweep
+static const SpeakerNote SFX_BOSS[]    = {{72, SQ, 60, 0, 0}, {76, SQ, 60, 0, 0}, {79, SQ, 60, 0, 0}, {84, SQ, 170, 0, 0}}; // fanfare
+static const SpeakerNote SFX_OVER[]    = {{72, SQ, 120, 0, 0}, {68, SQ, 120, 0, 0}, {64, SQ, 120, 0, 0}, {59, SQ, 260, 0, 0}}; // descending
+static const SpeakerNote SFX_WIN[]     = {{84, SQ, 70, 0, 0}, {88, SQ, 70, 0, 0}, {91, SQ, 200, 0, 0}};  // victory flourish
+
+// Master volume per Sound setting (Off/Soft/Normal/Loud). Each SFX keeps its own
+// tuned base loudness; sv() scales it by the chosen level, so Loud == the
+// original tuning and lower levels attenuate everything proportionally.
+static const uint8_t SND_VOL[4] = {0, 35, 70, 100};
+static uint8_t sv(uint8_t base) { return (uint16_t)base * SND_VOL[s_sound_vol & 3] / 100; }
+
+// Quiet Time is the watch saying "not now" — a game blipping through it is
+// exactly what the user turned it on to stop. The setting stays where it was;
+// this only silences the speaker while the mode is active.
+static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active(); }
+
+static void sfx_play(const SpeakerNote *n, uint32_t c) { if (sfx_enabled()) speaker_play_notes(n, c, sv(SFX_VOL)); }
+static void sfx_shoot(void)   { if (sfx_enabled()) speaker_play_tone(900, 18, sv(55), SQ); }  // brief, so rapid fire isn't fatiguing
+static void sfx_zap(void)     { if (sfx_enabled()) speaker_play_tone(320, 28, sv(70), SQ); }
+static void sfx_hurt(void)    { if (sfx_enabled()) speaker_play_tone(150, 120, sv(92), SQ); }
+static void sfx_jam(void)     { if (sfx_enabled()) speaker_play_tone(120, 90, sv(92), SQ); }
+static void sfx_collect(void) { sfx_play(SFX_COLLECT, SFX_N(SFX_COLLECT)); }
+static void sfx_bomb(void)    { sfx_play(SFX_BOMB, SFX_N(SFX_BOMB)); }
+static void sfx_boss(void)    { sfx_play(SFX_BOSS, SFX_N(SFX_BOSS)); }
+static void sfx_over(void)    { sfx_play(SFX_OVER, SFX_N(SFX_OVER)); }
+static void sfx_win(void)     { sfx_play(SFX_WIN, SFX_N(SFX_WIN)); }
+
 // Backlight "always on": forces the light while the player presses buttons,
 // reverting to the watch's automatic behaviour after an idle timeout so it
 // can't quietly drain the battery. (Same approach as PebbleDiver.)
 static void backlight_timeout(void *data) { s_backlight_timer = NULL; light_enable(false); }
+// Push the auto-off further out (or start it). No-op unless in TIMED mode.
 static void backlight_touch(void) {
-  if (!s_backlight_on) return;
+  if (s_bl_mode != BL_TIMED) return;
   light_enable(true);
-  if (s_backlight_timer) app_timer_reschedule(s_backlight_timer, BACKLIGHT_TIMEOUT_MS);
-  else s_backlight_timer = app_timer_register(BACKLIGHT_TIMEOUT_MS, backlight_timeout, NULL);
+  if (s_backlight_timer) app_timer_reschedule(s_backlight_timer, BL_TIMEOUT_MS);
+  else s_backlight_timer = app_timer_register(BL_TIMEOUT_MS, backlight_timeout, NULL);
 }
 static void backlight_disable(void) {
   if (s_backlight_timer) { app_timer_cancel(s_backlight_timer); s_backlight_timer = NULL; }
   light_enable(false);
+}
+// ALWAYS forces the light on; TIMED lights while interacting then auto-dims;
+// OFF hands back to the watch's normal auto-dim.
+static void apply_backlight(void) {
+  if (s_backlight_timer) { app_timer_cancel(s_backlight_timer); s_backlight_timer = NULL; }
+  switch (s_bl_mode) {
+    case BL_ALWAYS: light_enable(true); break;
+    case BL_TIMED:  backlight_touch(); break;
+    default:        light_enable(false); break;
+  }
 }
 
 static void save_progress(void) {
@@ -418,10 +497,10 @@ static void save_progress(void) {
   persist_write_int(PK_COLLECT, s_collected);
   persist_write_int(PK_BESTSCORE, s_best_score);
   persist_write_bool(PK_SECRET, s_secret_seen);
-  persist_write_bool(PK_BACKLIGHT, s_backlight_on);
+  persist_write_int(PK_BL_MODE, s_bl_mode);
   persist_write_bool(PK_JAM, s_jam_on);
   persist_write_bool(PK_RUMBLE, s_rumble_on);
-  persist_write_bool(PK_SOUND, s_sound_on);
+  persist_write_int(PK_SOUND_VOL, s_sound_vol);
 }
 static void load_progress(void) {
   s_unlocked = persist_exists(PK_UNLOCKED) ? persist_read_int(PK_UNLOCKED) : 0;
@@ -429,10 +508,18 @@ static void load_progress(void) {
   s_collected = persist_exists(PK_COLLECT) ? persist_read_int(PK_COLLECT) : 0;
   s_best_score = persist_exists(PK_BESTSCORE) ? persist_read_int(PK_BESTSCORE) : 0;
   s_secret_seen = persist_exists(PK_SECRET) ? persist_read_bool(PK_SECRET) : false;
-  s_backlight_on = persist_exists(PK_BACKLIGHT) ? persist_read_bool(PK_BACKLIGHT) : false;
+  // Migrate the old on/off backlight bool to the 3-state mode on first run.
+  if (persist_exists(PK_BL_MODE)) s_bl_mode = persist_read_int(PK_BL_MODE);
+  else s_bl_mode = (persist_exists(PK_BACKLIGHT) && persist_read_bool(PK_BACKLIGHT)) ? BL_TIMED : BL_OFF;
+  if (s_bl_mode < 0 || s_bl_mode >= NUM_BL_MODES) s_bl_mode = BL_OFF;
   s_jam_on = persist_exists(PK_JAM) ? persist_read_bool(PK_JAM) : true;
   s_rumble_on = persist_exists(PK_RUMBLE) ? persist_read_bool(PK_RUMBLE) : true;
-  s_sound_on = persist_exists(PK_SOUND) ? persist_read_bool(PK_SOUND) : true;
+  // Migrate the old on/off sound bool to the 4-level volume. It only ever said
+  // "on", never "loud", so it lands on the same Soft the fresh install gets.
+  if (persist_exists(PK_SOUND_VOL)) s_sound_vol = persist_read_int(PK_SOUND_VOL);
+  else if (persist_exists(PK_SOUND)) s_sound_vol = persist_read_bool(PK_SOUND) ? 1 : 0;
+  else s_sound_vol = 1;
+  if (s_sound_vol < 0 || s_sound_vol > 3) s_sound_vol = 1;
 }
 
 // Rebble is a full surprise — kept off the map until discovered. Pluto stays
@@ -499,7 +586,8 @@ static void begin_phase_playing(void) {
 
 static void start_planet(int idx) {
   GRect b = layer_get_bounds(s_layer);
-  s_wls = b.size.h; s_hls = b.size.w;
+  s_wls = b.size.h; s_hls = b.size.w; s_native_h = b.size.h;
+  if (idx == P_PLUTO) s_portal = false;   // the reveal has served its purpose
   s_planet = idx;
   s_hp_max = HP_MAX_BASE + s_hp_bonus;
   s_phase = PH_APPROACH;
@@ -547,6 +635,7 @@ static void game_over(void) {
   save_progress();
   s_state = ST_GAMEOVER;
   vibe_long();
+  sfx_over();
   s_go_lock = true;
   app_timer_register(1000, go_unlock, NULL);
   layer_mark_dirty(s_layer);
@@ -577,6 +666,7 @@ static void clear_level(void) {
     s_state = all8 ? ST_SECRET_ENDING : ST_VICTORY;
     if (all8) { s_secret_seen = true; save_progress(); }
     vibe_double();
+    sfx_win();
     s_go_lock = true;
     app_timer_register(1200, go_unlock, NULL);
     layer_mark_dirty(s_layer);
@@ -630,6 +720,7 @@ static void hurt_ship(int8_t dmg) {
   s_hp -= dmg;
   s_invuln = 40;
   vibe_short();
+  sfx_hurt();
   if (s_hp <= 0) { s_hp = 0; lose_life(); }
 }
 
@@ -638,12 +729,13 @@ static void kill_enemy(Enemy *e) {
   s_score += (e->kind == EN_FIGHTER) ? 30 : (e->kind == EN_MINE ? 20 : 10);
   s_special += s_special_gain;
   if (s_special > SPECIAL_MAX) s_special = SPECIAL_MAX;
+  sfx_zap();
   e->kind = EN_NONE;
 }
 
 static void fire_player(void) {
   for (int i = 0; i < MAX_PB; i++)
-    if (!s_pb[i].on) { s_pb[i].on = true; s_pb[i].u_fp = (SHIP_U + 10) << FP; s_pb[i].v = s_ship_v_fp >> FP; return; }
+    if (!s_pb[i].on) { s_pb[i].on = true; s_pb[i].u_fp = (SHIP_U + 10) << FP; s_pb[i].v = s_ship_v_fp >> FP; sfx_shoot(); return; }
 }
 
 static void spawn_enemy(void) {
@@ -744,6 +836,7 @@ static void smart_bomb(void) {
   if (s_special < SPECIAL_MAX) return;
   s_special = 0;
   vibe_double();
+  sfx_bomb();
   for (int i = 0; i < MAX_EN; i++)
     if (s_en[i].kind != EN_NONE && s_en[i].kind != EN_COLLECT) {
       spawn_particle(s_en[i].u_fp >> FP, s_en[i].v_fp >> FP, 8);
@@ -791,6 +884,7 @@ static void boss_dead(int16_t bu, int16_t bv) {
   s_phase = PH_CLEARED;
   s_phase_timer = CLEARED_TICKS;
   vibe_double();
+  sfx_boss();
 }
 
 static void boss_hit(int16_t bu, int16_t bv) {
@@ -939,7 +1033,7 @@ static void game_tick(void *data) {
   s_timer = app_timer_register(TICK_MS, game_tick, NULL);
   s_tick++;
   GRect b = layer_get_bounds(s_layer);
-  s_wls = b.size.h; s_hls = b.size.w;
+  s_wls = b.size.h; s_hls = b.size.w; s_native_h = b.size.h;
 
   ship_physics();
   int16_t sv = s_ship_v_fp >> FP;
@@ -950,7 +1044,7 @@ static void game_tick(void *data) {
     s_jam--;
   } else if (s_shoot && s_fire_cd == 0) {
     if (s_jam_on && s_heat >= HEAT_MAX) {
-      s_jam = JAM_TICKS; s_heat = 0; vibe_short();   // overheated from holding — cool it
+      s_jam = JAM_TICKS; s_heat = 0; vibe_short(); sfx_jam();   // overheated from holding — cool it
     } else {
       fire_player();
       s_fire_cd = s_fire_cd_base;
@@ -1037,6 +1131,7 @@ static void game_tick(void *data) {
         save_progress();
         for (int k = 0; k < 4; k++) spawn_particle(ex, ey, 8);
         vibe_double();
+        sfx_collect();
         e->kind = EN_NONE;
       } else if (e->kind == EN_ACID) {
         hurt_ship(1);                    // lingering zone — keeps the cloud
@@ -1134,7 +1229,7 @@ static void draw_ship(GContext *ctx, int16_t u, int16_t v) {
 }
 
 static void draw_pebble_icon(GContext *ctx, int16_t u, int16_t v, bool filled) {
-  graphics_context_set_stroke_color(ctx, filled ? GColorWhite : GColorDarkGray);
+  graphics_context_set_stroke_color(ctx, filled ? GColorWhite : GColorLightGray);
   graphics_draw_rect(ctx, ls(u - 4, v - 6, 8, 12));
   if (filled) {
     graphics_context_set_fill_color(ctx, GColorMediumSpringGreen);
@@ -1412,18 +1507,18 @@ static void draw_game(GContext *ctx, GRect b) {
     graphics_context_set_fill_color(ctx, GColorBlack);
     graphics_fill_rect(ctx, ls(0, H2 / 2 - 26, W, 52), 0, GCornerNone);
     const char *w1 = (s_planet == P_MOON) ? S(S_APPROACH) : S(S_WARNING);
-    draw_text_center(ctx, w1, W / 2, H2 / 2 - 22, true, s_planet == P_MOON ? GColorLightGray : GColorRed);
+    draw_text_center_fit(ctx, w1, W / 2, H2 / 2 - 22, s_planet == P_MOON ? GColorLightGray : GColorRed);
     draw_text_center(ctx, PLANETS[s_planet].boss, W / 2, H2 / 2 + 4, false, GColorWhite);
   }
   // Rebble: glitching signal reveal during the flythrough
   if (s_planet == P_REBBLE && s_phase == PH_APPROACH) {
     int16_t H2 = b.size.w;
     if ((s_tick / 3) % 5 != 0) {   // glitchy flicker
-      draw_text_center(ctx, S(S_SIGNAL), W / 2, H2 / 2 - 20, false, GColorGreen);
+      draw_text_wrap2(ctx, S(S_SIGNAL), W / 2, H2 / 2 - 26, FONT_S_H, GColorGreen);
       draw_text_center(ctx, "ORIGIN:  REBBLE", W / 2, H2 / 2, true, GColorGreen);
     }
     if (s_approach_left < s_approach_total / 2)
-      draw_text_center(ctx, S(S_OLD_FRIENDS), W / 2, H2 - 30, false, GColorGreen);
+      draw_text_wrap2(ctx, S(S_OLD_FRIENDS), W / 2, H2 - 36, FONT_S_H, GColorGreen);
   }
 }
 
@@ -1455,12 +1550,12 @@ static void draw_map(GContext *ctx, GRect b) {
   draw_text_center(ctx, PNAME(s_map_sel), W / 2, 78, true, GColorWhite);
   bool sel_playable = (s_unlocked >> s_map_sel) & 1;
   draw_text_center(ctx, sel_playable ? S(S_LAUNCH) : S(S_LOCKED), W / 2, 108, false,
-                   sel_playable ? GColorCyan : GColorDarkGray);
+                   sel_playable ? GColorCyan : GColorLightGray);
   draw_text_center(ctx, S(S_CHOOSE), W / 2, 126, false, GColorLightGray);
 
   if (s_portal)
-    draw_text_center(ctx, S(S_PORTAL), W / 2, 144, false,
-                     ((s_tick / 4) % 2) ? GColorMagenta : GColorCyan);
+    draw_text_wrap2(ctx, S(S_PORTAL), W / 2, 138, FONT_S_H,
+                    ((s_tick / 4) % 2) ? GColorMagenta : GColorCyan);
 
   // collectible strip
   draw_text_center(ctx, S(S_LOST_PEBBLES), W / 2, H - 40, false, GColorLightGray);
@@ -1489,7 +1584,7 @@ static void draw_upgrade(GContext *ctx, GRect b) {
     draw_text_ls(ctx, UP_NAME[type], u + 10, v + 7, false, sel ? GColorWhite : GColorLightGray);
     draw_text_ls(ctx, S(S_UD_TIMELINE + type), u + 10, v + 26, false, GColorCeleste);
   }
-  draw_text_center(ctx, S(S_UP_HINT), W / 2, H - 14, false, GColorLightGray);
+  draw_text_wrap2(ctx, S(S_UP_HINT), W / 2, H - 20, FONT_S_H, GColorLightGray);
 }
 
 static void draw_title(GContext *ctx, GRect b) {
@@ -1508,12 +1603,12 @@ static void draw_title(GContext *ctx, GRect b) {
   draw_ship(ctx, W / 2, y + 24);
   draw_text_center(ctx, S(S_START), W / 2, y + 42, false, GColorCyan);
   draw_text_center(ctx, S(S_TITLE_SETTINGS), W / 2, y + 58, false, GColorLightGray);
-  draw_text_center(ctx, S(S_HINT_FLY), W / 2, H - 32, false, GColorDarkGray);
-  draw_text_center(ctx, S(S_HINT_BOMB), W / 2, H - 18, false, GColorDarkGray);
+  draw_text_center(ctx, S(S_HINT_FLY), W / 2, H - 32, false, GColorLightGray);
+  draw_text_center(ctx, S(S_HINT_BOMB), W / 2, H - 18, false, GColorLightGray);
 
   char bb[24];
   snprintf(bb, sizeof(bb), S(S_BEST), (long)s_best_score);
-  draw_text_ls(ctx, bb, 6, 2, false, GColorDarkGray);
+  draw_text_ls(ctx, bb, 6, 2, false, GColorLightGray);
 }
 
 static void draw_gameover(GContext *ctx, GRect b) {
@@ -1525,7 +1620,7 @@ static void draw_gameover(GContext *ctx, GRect b) {
   snprintf(buf, sizeof(buf), S(S_SCORE), (long)s_score);
   draw_text_center(ctx, buf, W / 2, 78, false, GColorWhite);
   if (s_new_record) draw_text_center(ctx, S(S_NEW_RECORD), W / 2, 96, false, GColorGreen);
-  if (!s_go_lock) draw_text_center(ctx, S(S_RETRY), W / 2, 128, false, GColorCyan);
+  if (!s_go_lock) draw_text_wrap2(ctx, S(S_RETRY), W / 2, 128, FONT_S_H, GColorCyan);
 }
 
 static void draw_collect_gallery(GContext *ctx, int16_t W, int16_t v) {
@@ -1542,7 +1637,7 @@ static void draw_victory(GContext *ctx, GRect b) {
   graphics_context_set_fill_color(ctx, GColorGreen);
   graphics_fill_circle(ctx, lp(W / 2 - 6, 34), 7);
 
-  draw_text_center(ctx, S(S_EARTH_SAVED), W / 2, 74, true, GColorMediumSpringGreen);
+  draw_text_center_fit(ctx, S(S_EARTH_SAVED), W / 2, 74, GColorMediumSpringGreen);
   draw_text_center(ctx, S(S_CORE_DELIVERED), W / 2, 104, false, GColorWhite);
   char buf[32];
   snprintf(buf, sizeof(buf), S(S_SCORE), (long)s_score);
@@ -1561,7 +1656,7 @@ static void draw_secret_ending(GContext *ctx, GRect b) {
   graphics_context_set_stroke_color(ctx, sh);
   graphics_draw_rect(ctx, ls(4, 4, W - 8, H - 8));
 
-  draw_text_center(ctx, S(S_TRUE_ENDING), W / 2, 16, true, sh);
+  draw_text_center_fit(ctx, S(S_TRUE_ENDING), W / 2, 16, sh);
   draw_text_center(ctx, S(S_EPI1), W / 2, 48, false, GColorGreen);
   draw_text_center(ctx, S(S_EPI2), W / 2, 66, false, GColorGreen);
   draw_text_center(ctx, S(S_EPI3), W / 2, 82, false, GColorGreen);
@@ -1582,11 +1677,11 @@ static void draw_settings(GContext *ctx, GRect b) {
   int16_t W = b.size.h, H = b.size.w;
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
-  draw_text_center(ctx, S(S_SETTINGS), W / 2, 8, true, GColorChromeYellow);
+  draw_text_center_fit(ctx, S(S_SETTINGS), W / 2, 8, GColorChromeYellow);
 
   const char *labels[NUM_SETTINGS] = {
     S(S_BACKLIGHT), S(S_WEAPON_JAM), S(S_RUMBLE), S(S_SOUND), S(S_RESET) };
-  bool vals[4] = { s_backlight_on, s_jam_on, s_rumble_on, s_sound_on };
+  bool vals[4] = { s_bl_mode != BL_OFF, s_jam_on, s_rumble_on, s_sound_vol > 0 };
 
   for (int i = 0; i < NUM_SETTINGS; i++) {
     int16_t v = 42 + i * 26;
@@ -1594,14 +1689,27 @@ static void draw_settings(GContext *ctx, GRect b) {
       graphics_context_set_fill_color(ctx, GColorCobaltBlue);
       graphics_fill_rect(ctx, ls(8, v - 3, W - 16, 21), 0, GCornerNone);
     }
+    // Armed reset: the red goes in the bar rather than the text — red on the
+    // cobalt selection bar was the lowest-contrast pair on screen, in the one
+    // state that must be read.
     if (i == 4 && s_reset_armed) {
-      draw_text_ls(ctx, S(S_RESET_CONFIRM), 16, v, false, GColorRed);
+      graphics_context_set_fill_color(ctx, GColorRed);
+      graphics_fill_rect(ctx, ls(8, v - 3, W - 16, 21), 0, GCornerNone);
+      draw_text_ls(ctx, S(S_RESET_CONFIRM), 16, v, false, GColorWhite);
     } else {
       draw_text_ls(ctx, labels[i], 16, v, false, i == s_set_sel ? GColorWhite : GColorLightGray);
       if (i < 4) {
-        const char *vt = vals[i] ? S(S_ON) : S(S_OFF);
+        // Backlight (row 0) is a 3-state cycle, Sound (row 3) a 4-level volume;
+        // Weapon Jam and Rumble are simple on/off.
+        const char *vt = (i == 0)
+          ? ((s_bl_mode == BL_ALWAYS) ? S(S_BL_ALWAYS)
+             : (s_bl_mode == BL_TIMED) ? S(S_BL_TIMED) : S(S_OFF))
+          : (i == 3)
+          ? (s_sound_vol == 0 ? S(S_OFF) : s_sound_vol == 1 ? S(S_SND_SOFT)
+             : s_sound_vol == 2 ? S(S_SND_NORMAL) : S(S_SND_LOUD))
+          : (vals[i] ? S(S_ON) : S(S_OFF));
         draw_text_ls(ctx, vt, W - 14 - text_w_ls(vt, false), v, false,
-                     vals[i] ? GColorGreen : GColorDarkGray);
+                     vals[i] ? GColorGreen : GColorLightGray);
       }
     }
   }
@@ -1617,9 +1725,16 @@ static void layer_update(Layer *layer, GContext *ctx) {
     case ST_PLAYING: draw_game(ctx, b); break;
     case ST_PAUSED:
       draw_game(ctx, b);
-      graphics_context_set_fill_color(ctx, GColorBlack);
-      graphics_fill_rect(ctx, ls(b.size.h / 2 - 60, b.size.w / 2 - 20, 120, 40), 0, GCornerNone);
-      draw_text_center(ctx, S(S_PAUSED), b.size.h / 2, b.size.w / 2 - 14, true, GColorWhite);
+      // Size the plate from the word, not from a literal: NL "GEPAUZEERD" is
+      // 190px against the old fixed 120, so it hung 35px over each edge and
+      // landed on the live game field.
+      {
+        int16_t pw = text_w_ls(S(S_PAUSED), true) + 24;
+        if (pw > b.size.h) pw = b.size.h;
+        graphics_context_set_fill_color(ctx, GColorBlack);
+        graphics_fill_rect(ctx, ls(b.size.h / 2 - pw / 2, b.size.w / 2 - 20, pw, 40), 0, GCornerNone);
+        draw_text_center(ctx, S(S_PAUSED), b.size.h / 2, b.size.w / 2 - 14, true, GColorWhite);
+      }
       break;
     case ST_UPGRADE: draw_upgrade(ctx, b); break;
     case ST_GAMEOVER: draw_gameover(ctx, b); break;
@@ -1669,12 +1784,12 @@ static void down_raw_up(ClickRecognizerRef rec, void *ctx) { s_shoot = false; }
 
 static void settings_select(void) {
   switch (s_set_sel) {
-    case 0: s_backlight_on = !s_backlight_on;
-            if (s_backlight_on) backlight_touch(); else backlight_disable();
-            persist_write_bool(PK_BACKLIGHT, s_backlight_on); break;
+    case 0: s_bl_mode = (s_bl_mode + 1) % NUM_BL_MODES;   // Off -> Timeout -> Always
+            apply_backlight();
+            persist_write_int(PK_BL_MODE, s_bl_mode); break;
     case 1: s_jam_on = !s_jam_on; persist_write_bool(PK_JAM, s_jam_on); break;
     case 2: s_rumble_on = !s_rumble_on; persist_write_bool(PK_RUMBLE, s_rumble_on); if (s_rumble_on) vibe_short(); break;
-    case 3: s_sound_on = !s_sound_on; persist_write_bool(PK_SOUND, s_sound_on); break;
+    case 3: s_sound_vol = (s_sound_vol + 1) % 4; persist_write_int(PK_SOUND_VOL, s_sound_vol); if (s_sound_vol) sfx_collect(); break;
     case 4:
       if (s_reset_armed) { reset_save(); s_reset_armed = false; }
       else s_reset_armed = true;
@@ -1749,7 +1864,7 @@ static void init(void) {
   srand(time(NULL));
   pick_language();
   load_progress();
-  if (s_backlight_on) backlight_touch();
+  apply_backlight();
   s_window = window_create();
   window_set_click_config_provider(s_window, click_config);
   window_set_window_handlers(s_window, (WindowHandlers) { .load = window_load, .unload = window_unload });
