@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+- **Menu icon and store art got a black outline** — the ship sprite is four
+  light colours on transparent, which disappeared against a light launcher
+  background. No gameplay changes.
+
 ## 1.0.0
 
 - Initial release: **PBL-7**, a landscape shoot-'em-up for the Pebble Time 2.

@@ -34,6 +34,7 @@ GRAY = (0xAA, 0xAA, 0xAA, 255)      # drone
 CHROME = (0xFF, 0xAA, 0x00, 255)
 OXFORD = (0x00, 0x00, 0x55)         # space background
 DEEP = (0x02, 0x02, 0x14)
+BLACK = (0, 0, 0, 255)               # ship outline, matching tools/gen_icon.py
 
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
@@ -61,20 +62,32 @@ def starfield(canvas, n, seed=1):
 
 
 def draw_ship(d, cx, cy, scale):
+    # Matches tools/gen_icon.py's draw_ship: same outline treatment, so the
+    # launcher icon, store icons and banner all show the same silhouette.
     def s(v):
         return v * scale
-    # thruster
-    d.polygon([(cx - s(0.42), cy), (cx - s(0.24), cy - s(0.11)),
-               (cx - s(0.24), cy + s(0.11))], fill=ORANGE)
-    # hull
-    d.rounded_rectangle([cx - s(0.28), cy - s(0.18), cx + s(0.20), cy + s(0.18)],
-                        radius=s(0.10), fill=GREEN)
-    # nose
-    d.polygon([(cx + s(0.20), cy - s(0.12)), (cx + s(0.44), cy),
-               (cx + s(0.20), cy + s(0.12))], fill=WHITE)
-    # canopy
-    cr = s(0.10)
-    d.ellipse([cx - cr, cy - s(0.05) - cr, cx + cr, cy - s(0.05) + cr], fill=CYAN)
+    ol = s(0.045)
+
+    def thruster(o):
+        d.polygon([(cx - s(0.42) - o, cy), (cx - s(0.24) + o, cy - s(0.11) - o),
+                   (cx - s(0.24) + o, cy + s(0.11) + o)], fill=BLACK if o else ORANGE)
+
+    def hull(o):
+        d.rounded_rectangle([cx - s(0.28) - o, cy - s(0.18) - o, cx + s(0.20) + o, cy + s(0.18) + o],
+                            radius=s(0.10) + o, fill=BLACK if o else GREEN)
+
+    def nose(o):
+        d.polygon([(cx + s(0.20) - o, cy - s(0.12) - o), (cx + s(0.44) + o, cy),
+                   (cx + s(0.20) - o, cy + s(0.12) + o)], fill=BLACK if o else WHITE)
+
+    def canopy(o):
+        cr = s(0.10) + o
+        d.ellipse([cx - cr, cy - s(0.05) - cr, cx + cr, cy - s(0.05) + cr], fill=BLACK if o else CYAN)
+
+    for shape in (thruster, hull, nose, canopy):
+        shape(ol)
+    for shape in (thruster, hull, nose, canopy):
+        shape(0)
 
 
 def draw_planet(canvas, cx, cy, r, col):
