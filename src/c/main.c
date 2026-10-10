@@ -137,7 +137,7 @@ enum {
   S_SETTINGS, S_BACKLIGHT, S_WEAPON_JAM, S_RUMBLE, S_SOUND, S_RESET,
   S_RESET_CONFIRM, S_ON, S_OFF, S_SET_HINT, S_TITLE_SETTINGS,
   S_BL_TIMED, S_BL_ALWAYS,
-  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD,
+  S_SND_SOFT, S_SND_NORMAL, S_SND_LOUD, S_SND_MUTED,
   NUM_STRS
 };
 
@@ -156,7 +156,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "SETTINGS", "Backlight", "Weapon Jam", "Rumble", "Sound", "Reset Save",
     "Press again to erase", "On", "Off", "UP/DOWN  SELECT toggle", "UP  settings",
     "Timeout", "Always",
-    "Soft", "Normal", "Loud",
+    "Soft", "Normal", "Loud", "Muted",
   },
   [L_NL] = {
     "BRENG DE TIME CORE NAAR AARDE", "Aardes laatste hoop", "SELECT  start",
@@ -172,7 +172,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "INSTELLINGEN", "Verlichting", "Wapenstoring", "Trillen", "Geluid", "Wissen",
     "Nogmaals om te wissen", "Aan", "Uit", "UP/DOWN  SELECT wisselen", "UP  instellingen",
     "Time-out", "Altijd",
-    "Zacht", "Normaal", "Luid",
+    "Zacht", "Normaal", "Luid", "Gedempt",
   },
   [L_FR] = {
     "LIVREZ LE TIME CORE À LA TERRE", "Dernier espoir", "SELECT  jouer",
@@ -188,7 +188,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "RÉGLAGES", "Éclairage", "Enrayage", "Vibration", "Son", "Effacer",
     "Encore pour effacer", "Activé", "Désactivé", "UP/DOWN  SELECT changer", "UP  réglages",
     "Minuteur", "Toujours",
-    "Doux", "Normal", "Fort",
+    "Doux", "Normal", "Fort", "Muet",
   },
   [L_DE] = {
     "BRING DEN TIME CORE ZUR ERDE", "Letzte Hoffnung", "SELECT  Start",
@@ -204,7 +204,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "EINSTELLUNGEN", "Beleuchtung", "Ladehemmung", "Vibration", "Ton", "Löschen",
     "Nochmal zum Löschen", "An", "Aus", "UP/DOWN  SELECT ändern", "UP  Optionen",
     "Zeitlimit", "Immer",
-    "Leise", "Normal", "Laut",
+    "Leise", "Normal", "Laut", "Stumm",
   },
   [L_ES] = {
     "LLEVA EL TIME CORE A LA TIERRA", "Última esperanza", "SELECT  jugar",
@@ -220,7 +220,7 @@ static const char *TR[NUM_LANGS][NUM_STRS] = {
     "AJUSTES", "Luz", "Atasco", "Vibración", "Sonido", "Borrar",
     "Otra vez para borrar", "Sí", "No", "UP/DOWN  SELECT cambiar", "UP  ajustes",
     "Con tiempo", "Siempre",
-    "Bajo", "Normal", "Alto",
+    "Bajo", "Normal", "Alto", "Silencio",
   },
 };
 
@@ -431,18 +431,72 @@ static void vibe_long(void)  { if (s_rumble_on) vibes_long_pulse(); }
 static void vibe_double(void){ if (s_rumble_on) vibes_double_pulse(); }
 
 // ---------------------------------------------------------------------------
-// Sound effects (PT2 speaker). Short chiptune blips, all gated by the Sound
-// setting. MIDI notes: 60 = C4; velocity 0 = use the call's global volume.
+// Sound effects (PT2 speaker), all gated by the Sound setting. Arcade chiptune:
+// square-wave melodies, plus real explosions -- one noise burst synthesised by
+// tools/gen_sfx.py (resources/sfx/boom.raw) and pitch-shifted per use, high and
+// short for a fighter, low and long for a boss. Fanfares carry a bass voice via
+// speaker_play_tracks(). MIDI notes: 60 = C4. Velocity 0 = the call's volume; a
+// nonzero velocity per note shapes a fade.
 // ---------------------------------------------------------------------------
 #define SFX_VOL 80
 #define SFX_N(a) (sizeof(a) / sizeof((a)[0]))
-#define SQ SpeakerWaveformSquare
+#define SQ  SpeakerWaveformSquare
+#define TR_ SpeakerWaveformTriangle
+#define SAW SpeakerWaveformSawtooth
+#define REST(ms) {0, SQ, ms, 0, 0}
 
-static const SpeakerNote SFX_COLLECT[] = {{81, SQ, 45, 0, 0}, {86, SQ, 45, 0, 0}, {93, SQ, 120, 0, 0}}; // rising jingle
-static const SpeakerNote SFX_BOMB[]    = {{72, SQ, 40, 0, 0}, {60, SQ, 60, 0, 0}, {48, SQ, 150, 0, 0}};  // heavy sweep
-static const SpeakerNote SFX_BOSS[]    = {{72, SQ, 60, 0, 0}, {76, SQ, 60, 0, 0}, {79, SQ, 60, 0, 0}, {84, SQ, 170, 0, 0}}; // fanfare
-static const SpeakerNote SFX_OVER[]    = {{72, SQ, 120, 0, 0}, {68, SQ, 120, 0, 0}, {64, SQ, 120, 0, 0}, {59, SQ, 260, 0, 0}}; // descending
-static const SpeakerNote SFX_WIN[]     = {{84, SQ, 70, 0, 0}, {88, SQ, 70, 0, 0}, {91, SQ, 200, 0, 0}};  // victory flourish
+// The explosion sample; base note = the pitch it was rendered at. The waveform
+// field of a sample track's notes is ignored.
+#define BOOM_BASE 72
+static SpeakerSample s_boom = { NULL, 0, SpeakerPcmFormat_16kHz_8bit, BOOM_BASE, false };
+
+// Shot: a quiet two-step "pew" -- quiet because it fires many times a second.
+static const SpeakerNote SHOT[] = {{86, SQ, 14, 55, 0}, {79, SQ, 18, 35, 0}};
+// Enemies going up: a fighter or drone pops, a mine goes off deeper.
+static const SpeakerNote POP_SMALL[] = {{86, SQ, 140, 100, 0}};
+static const SpeakerNote POP_MINE[]  = {{76, SQ, 220, 115, 0}};
+// Hit: a low crack under a falling tone.
+static const SpeakerNote HURT_BOOM[] = {{66, SQ, 220, 110, 0}};
+static const SpeakerNote HURT_TONE[] = {{57, SQ, 60, 100, 0}, {50, SQ, 100, 80, 0}};
+// Overheat: the gun fizzles out.
+static const SpeakerNote JAM_TONE[] = {{60, SAW, 50, 100, 0}, {57, SAW, 50, 90, 0}, {53, SAW, 80, 70, 0}};
+static const SpeakerNote JAM_HISS[] = {{98, SQ, 150, 60, 0}};
+// Collectible: the rising jingle, with a triangle an octave below for weight.
+static const SpeakerNote COLLECT_A[] = {{81, SQ, 45, 0, 0}, {86, SQ, 45, 0, 0}, {93, SQ, 120, 0, 0}};
+static const SpeakerNote COLLECT_B[] = {{69, TR_, 45, 0, 0}, {74, TR_, 45, 0, 0}, {81, TR_, 120, 0, 0}};
+// Smart bomb: the biggest blast in the game, with a falling sweep through it.
+static const SpeakerNote BOMB_BOOM[]  = {{58, SQ, 700, 127, 0}};
+static const SpeakerNote BOMB_SWEEP[] = {{84, SQ, 40, 90, 0}, {79, SQ, 40, 85, 0}, {74, SQ, 40, 80, 0},
+                                         {69, SQ, 50, 70, 0}, {64, SQ, 60, 60, 0}, {57, SQ, 90, 45, 0}};
+// A boss on its way: the WARNING siren.
+static const SpeakerNote SIREN[] = {{76, SAW, 170, 90, 0}, {71, SAW, 170, 90, 0},
+                                    {76, SAW, 170, 90, 0}, {71, SAW, 170, 90, 0},
+                                    {76, SAW, 170, 90, 0}, {71, SAW, 250, 70, 0}};
+// A boss down: a big blast, then the fanfare over a bass line.
+static const SpeakerNote BIG_BOOM[]  = {{55, SQ, 650, 127, 0}};
+static const SpeakerNote FANFARE_A[] = {REST(420), {72, SQ, 70, 0, 0}, {76, SQ, 70, 0, 0},
+                                        {79, SQ, 70, 0, 0}, {84, SQ, 240, 0, 0}};
+static const SpeakerNote FANFARE_B[] = {REST(420), {60, TR_, 210, 0, 0}, {67, TR_, 240, 0, 0}};
+// Losing a ship: a blast and a falling tone (game over has its own).
+static const SpeakerNote SHIP_BOOM[] = {{62, SQ, 420, 120, 0}};
+static const SpeakerNote SHIP_TONE[] = {{67, SQ, 90, 90, 0}, {60, SQ, 90, 75, 0}, {55, SQ, 160, 60, 0}};
+// Launching into a planet: a rising whoosh of noise and tone.
+static const SpeakerNote WHOOSH[]      = {{70, SQ, 70, 50, 0}, {77, SQ, 70, 65, 0}, {84, SQ, 90, 55, 0}};
+static const SpeakerNote WHOOSH_TONE[] = {{60, SQ, 50, 50, 0}, {64, SQ, 50, 55, 0}, {67, SQ, 50, 60, 0},
+                                          {72, SQ, 80, 55, 0}};
+// Game over: a slow minor fall over a bass.
+static const SpeakerNote OVER_A[] = {{67, SQ, 200, 0, 0}, {63, SQ, 200, 0, 0}, {60, SQ, 200, 0, 0},
+                                     {55, SQ, 480, 0, 0}};
+static const SpeakerNote OVER_B[] = {{60, TR_, 400, 0, 0}, {56, TR_, 200, 0, 0},
+                                     {55, TR_, 480, 0, 0}};
+// Earth saved: the full fanfare, melody over bass.
+static const SpeakerNote WIN_A[] = {{72, SQ, 90, 0, 0}, {72, SQ, 90, 0, 0}, {72, SQ, 90, 0, 0},
+                                    {77, SQ, 360, 0, 0}, {81, SQ, 180, 0, 0}, {84, SQ, 520, 0, 0}};
+static const SpeakerNote WIN_B[] = {{60, TR_, 270, 0, 0}, {65, TR_, 360, 0, 0}, {69, TR_, 180, 0, 0},
+                                    {72, TR_, 520, 0, 0}};
+
+#define TRACK(n)  { n, SFX_N(n), NULL }
+#define BOOM(n)   { n, SFX_N(n), &s_boom }
 
 // Master volume per Sound setting (Off/Soft/Normal/Loud). Each SFX keeps its own
 // tuned base loudness; sv() scales it by the chosen level, so Loud == the
@@ -453,18 +507,50 @@ static uint8_t sv(uint8_t base) { return (uint16_t)base * SND_VOL[s_sound_vol & 
 // Quiet Time is the watch saying "not now" — a game blipping through it is
 // exactly what the user turned it on to stop. The setting stays where it was;
 // this only silences the speaker while the mode is active.
-static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active(); }
+// Quiet Time and the watch's own mute (Settings → Sounds & Haptics) both win
+// over the in-game Sound level.
+static bool sfx_enabled(void) { return s_sound_vol && !quiet_time_is_active() && !speaker_is_muted(); }
 
 static void sfx_play(const SpeakerNote *n, uint32_t c) { if (sfx_enabled()) speaker_play_notes(n, c, sv(SFX_VOL)); }
-static void sfx_shoot(void)   { if (sfx_enabled()) speaker_play_tone(900, 18, sv(55), SQ); }  // brief, so rapid fire isn't fatiguing
-static void sfx_zap(void)     { if (sfx_enabled()) speaker_play_tone(320, 28, sv(70), SQ); }
-static void sfx_hurt(void)    { if (sfx_enabled()) speaker_play_tone(150, 120, sv(92), SQ); }
-static void sfx_jam(void)     { if (sfx_enabled()) speaker_play_tone(120, 90, sv(92), SQ); }
-static void sfx_collect(void) { sfx_play(SFX_COLLECT, SFX_N(SFX_COLLECT)); }
-static void sfx_bomb(void)    { sfx_play(SFX_BOMB, SFX_N(SFX_BOMB)); }
-static void sfx_boss(void)    { sfx_play(SFX_BOSS, SFX_N(SFX_BOSS)); }
-static void sfx_over(void)    { sfx_play(SFX_OVER, SFX_N(SFX_OVER)); }
-static void sfx_win(void)     { sfx_play(SFX_WIN, SFX_N(SFX_WIN)); }
+
+// Plays the tracks; one whose sample failed to load is left out rather than
+// played from a NULL buffer.
+static void sfx_tracks(const SpeakerTrack *t, uint32_t c) {
+  if (!sfx_enabled()) return;
+  SpeakerTrack ok[SPEAKER_MAX_TRACKS];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < c && n < SPEAKER_MAX_TRACKS; i++) {
+    if (t[i].sample && !t[i].sample->data) continue;
+    ok[n++] = t[i];
+  }
+  if (n) speaker_play_tracks(ok, n, sv(SFX_VOL));
+}
+#define PLAY(...) do { static const SpeakerTrack t_[] = { __VA_ARGS__ }; sfx_tracks(t_, SFX_N(t_)); } while (0)
+
+// Loaded once and never freed: a sound can still be playing from the buffer when
+// the app closes, and the system reclaims the app's heap after it stops it.
+static void sfx_load(void) {
+  ResHandle h = resource_get_handle(RESOURCE_ID_SFX_BOOM);
+  size_t size = resource_size(h);
+  uint8_t *buf = malloc(size);
+  if (!buf) return;
+  s_boom.num_bytes = resource_load(h, buf, size);
+  s_boom.data = buf;
+}
+
+static void sfx_shoot(void)       { sfx_play(SHOT, SFX_N(SHOT)); }
+static void sfx_pop(bool mine)    { if (mine) PLAY(BOOM(POP_MINE)); else PLAY(BOOM(POP_SMALL)); }
+static void sfx_hurt(void)        { PLAY(BOOM(HURT_BOOM), TRACK(HURT_TONE)); }
+static void sfx_jam(void)         { PLAY(TRACK(JAM_TONE), BOOM(JAM_HISS)); }
+static void sfx_collect(void)     { PLAY(TRACK(COLLECT_A), TRACK(COLLECT_B)); }
+static void sfx_bomb(void)        { PLAY(BOOM(BOMB_BOOM), TRACK(BOMB_SWEEP)); }
+static void sfx_siren(void)       { sfx_play(SIREN, SFX_N(SIREN)); }
+static void sfx_boss_down(void)   { PLAY(BOOM(BIG_BOOM), TRACK(FANFARE_A), TRACK(FANFARE_B)); }
+static void sfx_cleared(void)     { PLAY(TRACK(FANFARE_A), TRACK(FANFARE_B)); }
+static void sfx_ship_lost(void)   { PLAY(BOOM(SHIP_BOOM), TRACK(SHIP_TONE)); }
+static void sfx_launch(void)      { PLAY(BOOM(WHOOSH), TRACK(WHOOSH_TONE)); }
+static void sfx_over(void)        { PLAY(TRACK(OVER_A), TRACK(OVER_B)); }
+static void sfx_win(void)         { PLAY(TRACK(WIN_A), TRACK(WIN_B)); }
 
 // Backlight "always on": forces the light while the player presses buttons,
 // reverting to the watch's automatic behaviour after an idle timeout so it
@@ -598,6 +684,7 @@ static void start_planet(int idx) {
   s_collect_spawned = false;
   begin_phase_playing();
   s_state = ST_PLAYING;
+  sfx_launch();
   start_timer();
   layer_mark_dirty(s_layer);
 }
@@ -700,6 +787,7 @@ static void lose_life(void) {
   spawn_particle(SHIP_U, s_ship_v_fp >> FP, 12);
   if (s_lives < 0) { game_over(); return; }
   vibe_long();
+  sfx_ship_lost();
   // checkpoint: restart current phase
   if (s_phase == PH_BOSS || (s_phase == PH_BOSS_INTRO && s_intro_reached)) {
     begin_phase_playing();
@@ -713,13 +801,32 @@ static void lose_life(void) {
   }
 }
 
+// Colour backlight (Time 2; a no-op elsewhere): a hit flashes the light red,
+// a hit the shield soaks up flashes it blue, then the user's own colour returns.
+#define FLASH_MS        300
+#define FLASH_HIT       0xFF2814u
+#define FLASH_SHIELD    0x3C8CFFu
+static AppTimer *s_flash_timer;
+
+static void flash_end(void *data) {
+  s_flash_timer = NULL;
+  light_set_system_color();
+}
+
+static void flash_light(uint32_t rgb) {
+  light_set_color_rgb888(rgb);
+  if (s_flash_timer) app_timer_reschedule(s_flash_timer, FLASH_MS);
+  else s_flash_timer = app_timer_register(FLASH_MS, flash_end, NULL);
+}
+
 static void hurt_ship(int8_t dmg) {
   if (s_invuln > 0) return;
   s_boss_nodmg = false;    // any hit (even a blocked shield) breaks the no-damage run
-  if (s_shield > 0) { s_shield--; s_invuln = 35; vibe_short(); return; }
+  if (s_shield > 0) { s_shield--; s_invuln = 35; vibe_short(); flash_light(FLASH_SHIELD); return; }
   s_hp -= dmg;
   s_invuln = 40;
   vibe_short();
+  flash_light(FLASH_HIT);
   sfx_hurt();
   if (s_hp <= 0) { s_hp = 0; lose_life(); }
 }
@@ -729,7 +836,7 @@ static void kill_enemy(Enemy *e) {
   s_score += (e->kind == EN_FIGHTER) ? 30 : (e->kind == EN_MINE ? 20 : 10);
   s_special += s_special_gain;
   if (s_special > SPECIAL_MAX) s_special = SPECIAL_MAX;
-  sfx_zap();
+  sfx_pop(e->kind == EN_MINE);
   e->kind = EN_NONE;
 }
 
@@ -884,7 +991,7 @@ static void boss_dead(int16_t bu, int16_t bv) {
   s_phase = PH_CLEARED;
   s_phase_timer = CLEARED_TICKS;
   vibe_double();
-  sfx_boss();
+  sfx_boss_down();
 }
 
 static void boss_hit(int16_t bu, int16_t bv) {
@@ -1181,7 +1288,7 @@ static void game_tick(void *data) {
           s_approach_left < s_approach_total / 2) spawn_collectible();
       if (--s_approach_left <= 0) {
         if (s_planet == P_REBBLE) { s_phase = PH_CLEARED; s_phase_timer = 70; }   // signal → reveal → done
-        else { s_phase = PH_BOSS_INTRO; s_phase_timer = INTRO_TICKS; s_intro_reached = true; }
+        else { s_phase = PH_BOSS_INTRO; s_phase_timer = INTRO_TICKS; s_intro_reached = true; sfx_siren(); }
       }
       break;
     case PH_BOSS_INTRO:
@@ -1193,7 +1300,7 @@ static void game_tick(void *data) {
       break;
     case PH_BOSS:
       if (s_planet == P_MOON) {
-        if (count_turrets() == 0) { s_score += 250; s_phase = PH_CLEARED; s_phase_timer = CLEARED_TICKS; vibe_double(); }
+        if (count_turrets() == 0) { s_score += 250; s_phase = PH_CLEARED; s_phase_timer = CLEARED_TICKS; vibe_double(); sfx_cleared(); }
       } else {
         boss_tick(sv);
         if (s_state != ST_PLAYING) return;
@@ -1681,7 +1788,7 @@ static void draw_settings(GContext *ctx, GRect b) {
 
   const char *labels[NUM_SETTINGS] = {
     S(S_BACKLIGHT), S(S_WEAPON_JAM), S(S_RUMBLE), S(S_SOUND), S(S_RESET) };
-  bool vals[4] = { s_bl_mode != BL_OFF, s_jam_on, s_rumble_on, s_sound_vol > 0 };
+  bool vals[4] = { s_bl_mode != BL_OFF, s_jam_on, s_rumble_on, s_sound_vol > 0 && !speaker_is_muted() };
 
   for (int i = 0; i < NUM_SETTINGS; i++) {
     int16_t v = 42 + i * 26;
@@ -1705,7 +1812,8 @@ static void draw_settings(GContext *ctx, GRect b) {
           ? ((s_bl_mode == BL_ALWAYS) ? S(S_BL_ALWAYS)
              : (s_bl_mode == BL_TIMED) ? S(S_BL_TIMED) : S(S_OFF))
           : (i == 3)
-          ? (s_sound_vol == 0 ? S(S_OFF) : s_sound_vol == 1 ? S(S_SND_SOFT)
+          ? (s_sound_vol == 0 ? S(S_OFF) : speaker_is_muted() ? S(S_SND_MUTED)
+             : s_sound_vol == 1 ? S(S_SND_SOFT)
              : s_sound_vol == 2 ? S(S_SND_NORMAL) : S(S_SND_LOUD))
           : (vals[i] ? S(S_ON) : S(S_OFF));
         draw_text_ls(ctx, vt, W - 14 - text_w_ls(vt, false), v, false,
@@ -1864,6 +1972,7 @@ static void init(void) {
   srand(time(NULL));
   pick_language();
   load_progress();
+  sfx_load();
   apply_backlight();
   s_window = window_create();
   window_set_click_config_provider(s_window, click_config);

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.1.0
+
+- **Explosions and a fuller soundtrack.** Enemies, mines, the smart bomb, a
+  hit, a lost ship and a boss now go up in real explosions -- a noise burst
+  synthesised by `tools/gen_sfx.py`, pitched high and short for a fighter and
+  low and long for a boss -- instead of a bare square-wave tone. New sounds
+  where it was silent: a WARNING siren as a boss approaches, a rising whoosh at
+  launch, a blast when a ship is lost, and the fanfare when the Moon's turrets
+  fall. The boss, game-over and Earth-saved jingles get a bass voice through
+  `speaker_play_tracks()`, and game over has its own minor fall instead of the
+  one it shared with PebbleDiver. The shot is a quieter two-step "pew": since
+  firmware 4.40 drains the speaker pipeline, sounds this short are actually
+  heard, so rapid fire must not tire the ear.
+- **Follows the watch's speaker mute.** With the speaker muted in the watch
+  settings, the game plays silent (as in Quiet Time) and the Sound row in
+  Settings reads "Muted".
+- **Hit flash on the backlight (Pebble Time 2).** Taking a hit flashes the
+  colour backlight red for a moment, a hit the shield soaks up flashes it blue.
+
 ## 1.0.1
 
 - **Menu icon and store art got a black outline** — the ship sprite is four

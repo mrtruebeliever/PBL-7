@@ -64,6 +64,12 @@ headless testing:
 ~/.local/share/uv/tools/pebble-tool/bin/python tools/press.py select hold:up+down:1500 back
 ```
 
+Explosions come from one noise burst that `tools/gen_sfx.py` synthesises
+(`resources/sfx/boom.raw`, 16 kHz 8-bit); the game pitches it per use. Rerun
+the script after changing it; `--wav <dir>` also writes a preview. The rest of
+the sound is notes in `src/c/main.c`, the fanfares in two voices via
+`speaker_play_tracks()`.
+
 ## Release
 
 `tools/gen_icon.py` builds the launcher menu icon, `tools/gen_marketing.py` the
