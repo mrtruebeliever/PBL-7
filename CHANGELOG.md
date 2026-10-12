@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.0
+
+- **Sega-style pixel art.** The ship has a Pebblonian pilot under its canopy;
+  drones, fighters, mines, turrets, acid clouds and the lost Pebbles are pixel
+  sprites with black outlines, and every planet's boss is an armoured face in
+  that planet's colours (red when it overheats).
+- **Pebble Round 2 (gabbro):** a round screen looks the same either way up, so
+  there the game is played with the watch held normally. HUD and menus sit
+  inside the circle.
+- New launcher icon (readable in the launcher's greys), banner, store icons,
+  screenshots (also for the Round 2, plus a boss shot) and demo GIF.
+
 ## 1.1.0
 
 - **Explosions and a fuller soundtrack.** Enemies, mines, the smart bomb, a

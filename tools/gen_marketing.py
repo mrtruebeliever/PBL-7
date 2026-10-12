@@ -1,208 +1,176 @@
 #!/usr/bin/env python3
-"""Generates PBL-7's Rebble appstore marketing art: the two store icons and the
-listing banner. Style matches the in-game explorer ship (see draw_ship() in
-src/c/main.c) on a deep-space starfield.
-
-The banner makes the game's key quirk obvious: the Pebble Time 2 is held
-SIDEWAYS (a quarter turn, buttons along the bottom) so the display becomes a
-landscape 228x200 playfield. It shows a rotated PT2 with a mini gameplay scene
-on its screen plus a rotation arrow and an upright-watch hint.
+"""Generates PBL-7's Rebble appstore art from the in-game ship sprite
+(tools/sprites.py), scaled up with NEAREST so it stays crisp pixel art, in
+the same style as Pebble Peaks' store art. The banner's tagline keeps the
+game's key quirk in view: the watch is held sideways.
 
 Outputs:
-  store/icon-80.png            80x80
-  store/icon-144.png           144x144
-  store/banner-720x320.png     720x320
+  store/icon-80.png            80x80    (40x40 canvas, x2)
+  store/icon-144.png           144x144  (36x36 canvas, x4)
+  store/banner-720x320.png     720x320  (180x80 canvas, x4)
 
-Needs Pillow; run with the pebble-tool venv python (it already has Pillow):
-    ~/.local/share/uv/tools/pebble-tool/bin/python tools/gen_marketing.py
+Run from the project root (needs Pillow):  python3 tools/gen_marketing.py
 """
-import math
 import os
 import random
+import sys
 
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+from PIL import Image, ImageDraw, ImageFont
 
-SS = 4
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from sprites import ALL, PALETTE  # noqa: E402
 
-# In-game palette (Pebble 64-colour RGB).
-GREEN = (0x00, 0xFF, 0xAA, 255)     # ship hull (MediumSpringGreen)
-CYAN = (0x00, 0xFF, 0xFF, 255)      # canopy
-WHITE = (255, 255, 255, 255)
-ORANGE = (0xFF, 0xAA, 0x00, 255)    # thruster / Mercury
-RED = (0xFF, 0x00, 0x00, 255)       # fighter
-GRAY = (0xAA, 0xAA, 0xAA, 255)      # drone
-CHROME = (0xFF, 0xAA, 0x00, 255)
-OXFORD = (0x00, 0x00, 0x55)         # space background
-DEEP = (0x02, 0x02, 0x14)
-BLACK = (0, 0, 0, 255)               # ship outline, matching tools/gen_icon.py
-
-FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+C = {k: v[1] + (255,) for k, v in PALETTE.items()}
+C.update({
+    "O": (0xFF, 0xAA, 0x00, 255),   # ChromeYellow (Mercury, lit)
+    "Q": (0xFF, 0x55, 0x00, 255),   # Orange
+    "q": (0xAA, 0x55, 0x00, 255),   # WindsorTan (craters)
+    "r": (0xAA, 0x00, 0x00, 255),   # DarkCandyAppleRed
+    "V": (0xAA, 0x55, 0xFF, 255),   # LavenderIndigo (far stars)
+})
+SPACE = [(0x00, 0x00, 0x00), (0x00, 0x00, 0x55), (0x00, 0x00, 0xAA)]
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 
 
-def vgrad(w, h, top, bottom):
-    img = Image.new("RGB", (w, h))
+def space(img):
+    w, h = img.size
     px = img.load()
+    n = len(SPACE)
     for y in range(h):
-        t = y / max(1, h - 1)
-        row = tuple(int(top[i] + (bottom[i] - top[i]) * t) for i in range(3))
+        t = (y / max(1, h - 1)) * (n - 1)
+        i = min(int(t), n - 2)
+        frac = t - i
         for x in range(w):
-            px[x, y] = row
-    return img.convert("RGBA")
+            # ordered 2x2 dither between neighbouring palette bands
+            thr = ((x & 1) + 2 * (y & 1)) / 4.0 + 0.125
+            px[x, y] = SPACE[i + (1 if frac > thr else 0)] + (255,)
 
 
-def starfield(canvas, n, seed=1):
-    rnd = random.Random(seed)
-    d = ImageDraw.Draw(canvas)
-    W, H = canvas.size
+def stars(img, rng, n):
     for _ in range(n):
-        x, y = rnd.random() * W, rnd.random() * H
-        r = rnd.choice([1, 1, 1, 2])
-        c = rnd.choice([WHITE, (0xAA, 0xAA, 0xAA, 255), (0xDD, 0xDD, 0xFF, 255)])
-        d.ellipse([x - r, y - r, x + r, y + r], fill=c)
+        x, y = rng.randrange(img.width), rng.randrange(img.height)
+        img.putpixel((x, y), C["W"] if rng.random() < 0.6 else C["V"])
 
 
-def draw_ship(d, cx, cy, scale):
-    # Matches tools/gen_icon.py's draw_ship: same outline treatment, so the
-    # launcher icon, store icons and banner all show the same silhouette.
-    def s(v):
-        return v * scale
-    ol = s(0.045)
-
-    def thruster(o):
-        d.polygon([(cx - s(0.42) - o, cy), (cx - s(0.24) + o, cy - s(0.11) - o),
-                   (cx - s(0.24) + o, cy + s(0.11) + o)], fill=BLACK if o else ORANGE)
-
-    def hull(o):
-        d.rounded_rectangle([cx - s(0.28) - o, cy - s(0.18) - o, cx + s(0.20) + o, cy + s(0.18) + o],
-                            radius=s(0.10) + o, fill=BLACK if o else GREEN)
-
-    def nose(o):
-        d.polygon([(cx + s(0.20) - o, cy - s(0.12) - o), (cx + s(0.44) + o, cy),
-                   (cx + s(0.20) - o, cy + s(0.12) + o)], fill=BLACK if o else WHITE)
-
-    def canopy(o):
-        cr = s(0.10) + o
-        d.ellipse([cx - cr, cy - s(0.05) - cr, cx + cr, cy - s(0.05) + cr], fill=BLACK if o else CYAN)
-
-    for shape in (thruster, hull, nose, canopy):
-        shape(ol)
-    for shape in (thruster, hull, nose, canopy):
-        shape(0)
+def twinkle(img, x, y):
+    for dx, dy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+        img.putpixel((x + dx, y + dy), C["W"])
 
 
-def draw_planet(canvas, cx, cy, r, col):
-    d = ImageDraw.Draw(canvas)
-    d.ellipse([cx - r, cy - r, cx + r, cy + r], fill=col)
+def blit(img, name, x, y):
+    stamp(img, ALL[name], x, y)
 
 
-def store_icon(size):
-    W = size * SS
-    canvas = vgrad(W, W, OXFORD, DEEP)
-    starfield(canvas, int(W * 0.05))
-    # a planet at a corner
-    draw_planet(canvas, W * 0.82, W * 0.86, W * 0.30, (*ORANGE[:3], 255))
-    d = ImageDraw.Draw(canvas)
-    draw_ship(d, W * 0.44, W * 0.46, W * 0.72)
-    # a couple of shots
-    for i in range(3):
-        x = W * (0.60 + i * 0.10)
-        d.rounded_rectangle([x, W * 0.45, x + W * 0.06, W * 0.48], radius=W*0.01, fill=CYAN)
-    return canvas.resize((size, size), Image.LANCZOS)
+def stamp(img, rows, x, y):
+    for j, row in enumerate(rows):
+        for i, ch in enumerate(row):
+            if ch != "." and 0 <= x + i < img.width and 0 <= y + j < img.height:
+                img.putpixel((x + i, y + j), C[ch])
 
 
-def draw_watch_landscape(canvas, x, y, w, h):
-    """A stylised Pebble Time 2 held SIDEWAYS: body wider than tall, three
-    buttons along the bottom (DOWN/SELECT/UP), BACK on top, band stubs left and
-    right, and a mini gameplay scene on the landscape screen."""
-    d = ImageDraw.Draw(canvas)
-    # band stubs (were top/bottom, now left/right after the quarter turn)
-    bandc = (0x33, 0x33, 0x3A, 255)
-    d.rounded_rectangle([x - w * 0.10, y + h * 0.24, x + w * 0.03, y + h * 0.76], radius=10, fill=bandc)
-    d.rounded_rectangle([x + w * 0.97, y + h * 0.24, x + w * 1.10, y + h * 0.76], radius=10, fill=bandc)
-    # body / bezel
-    d.rounded_rectangle([x, y, x + w, y + h], radius=int(h * 0.14), fill=(0x0E, 0x0E, 0x14, 255))
-    d.rounded_rectangle([x + 4, y + 4, x + w - 4, y + h - 4], radius=int(h * 0.12),
-                        outline=(0x44, 0x44, 0x55, 255), width=3)
-    # buttons: three on the bottom edge, one on top
-    btnc = (0x66, 0x66, 0x70, 255)
-    for i, bx in enumerate((0.24, 0.48, 0.72)):
-        d.rounded_rectangle([x + w * bx, y + h + 2, x + w * bx + w * 0.10, y + h + 12], radius=4, fill=btnc)
-    d.rounded_rectangle([x + w * 0.44, y - 12, x + w * 0.44 + w * 0.12, y - 2], radius=4, fill=btnc)
-
-    # ---- screen (landscape playfield) ----
-    sx, sy, sw, sh = x + 12, y + 12, w - 24, h - 24
-    screen = Image.new("RGBA", (int(sw), int(sh)), (0, 0, 0, 0))
-    sd = ImageDraw.Draw(screen)
-    sd.rounded_rectangle([0, 0, sw, sh], radius=8, fill=OXFORD + (255,))
-    # HUD bar
-    sd.rectangle([0, 0, sw, sh * 0.12], fill=(0, 0, 0, 255))
-    sd.rectangle([6, sh * 0.03, sw * 0.30, sh * 0.09], fill=(0x00, 0xFF, 0x00, 255))   # HP
-    sd.rectangle([sw * 0.70, sh * 0.03, sw * 0.95, sh * 0.09], fill=(0x00, 0x77, 0xEE, 255))  # special
-    # starfield
-    rnd = random.Random(7)
-    for _ in range(40):
-        px, py = rnd.random() * sw, sh * 0.15 + rnd.random() * sh * 0.8
-        sd.ellipse([px, py, px + 2, py + 2], fill=WHITE)
-    # planet at horizon
-    sd.ellipse([sw * 0.72, sh * 0.78, sw * 1.15, sh * 1.35], fill=ORANGE)
-    # enemies
-    sd.ellipse([sw * 0.60, sh * 0.35, sw * 0.60 + 14, sh * 0.35 + 14], fill=GRAY)
-    sd.rounded_rectangle([sw * 0.78, sh * 0.50, sw * 0.78 + 20, sh * 0.50 + 12], radius=3, fill=RED)
-    # player shots
-    for i in range(3):
-        bx = sw * (0.30 + i * 0.10)
-        sd.rectangle([bx, sh * 0.47, bx + 10, sh * 0.50], fill=CYAN)
-    # ship
-    draw_ship(sd, sw * 0.16, sh * 0.48, sh * 0.34)
-    canvas.alpha_composite(screen, (int(sx), int(sy)))
+def planet(img, cx, cy, r):
+    """Mercury: lit upper-left, shaded lower-right, a few craters, outlined."""
+    px = img.load()
+    craters = [(cx - r * 0.45, cy - r * 0.55, r * 0.14), (cx - r * 0.1, cy - r * 0.8, r * 0.09),
+               (cx - r * 0.75, cy - r * 0.2, r * 0.1), (cx + r * 0.2, cy - r * 0.45, r * 0.07)]
+    for y in range(img.height):
+        for x in range(img.width):
+            d = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
+            if d <= r:
+                lit = (x - cx) * 0.7 + (y - cy) * 0.7
+                c = "O" if lit < -r * 0.55 else ("Q" if lit < r * 0.1 else "q")
+                for (kx, ky, kr) in craters:
+                    kd = ((x - kx) ** 2 + (y - ky) ** 2) ** 0.5
+                    if kd <= kr:
+                        c = "q" if (x - kx) + (y - ky) < 0 else "O"
+                px[x, y] = C[c]
+            elif d <= r + 1:
+                px[x, y] = C["K"]
 
 
-def rotation_hint(canvas, cx, cy):
-    """Small upright watch + curved arrow: 'turn it a quarter to play'."""
-    d = ImageDraw.Draw(canvas)
-    # tiny upright watch
-    d.rounded_rectangle([cx - 16, cy - 22, cx + 16, cy + 22], radius=6, fill=(0x22, 0x22, 0x2A, 255))
-    d.rounded_rectangle([cx - 12, cy - 18, cx + 12, cy + 18], radius=4, fill=OXFORD + (255,))
-    # curved arrow (quarter turn, clockwise)
-    bbox = [cx - 34, cy - 34, cx + 34, cy + 34]
-    d.arc(bbox, start=-80, end=20, fill=WHITE, width=4)
-    # arrowhead
-    ax, ay = cx + 32, cy - 6
-    d.polygon([(ax, ay), (ax - 12, ay - 4), (ax - 4, ay - 14)], fill=WHITE)
+BOLT = ["KKKKKKK", "KyYYWWK", "KKKKKKK"]
+
+
+def corona(img, cx, cy, r):
+    """The Solar Sentinel's rays: 12 yellow spokes."""
+    import math
+    for k in range(12):
+        a = k * math.pi / 6
+        for t in range(14, r + 1):
+            x, y = round(cx + math.cos(a) * t), round(cy + math.sin(a) * t)
+            if 0 <= x < img.width and 0 <= y < img.height:
+                img.putpixel((x, y), C["y"] if t % 3 else C["Y"])
+
+
+def text(img, xy, s, size, fill, shade=None, shadow=(0, 0, 0x55, 255)):
+    """Thresholded bold text with a black outline and a drop shadow."""
+    W, H = img.size
+    f = ImageFont.truetype(FONT, size)
+    mask = Image.new("L", img.size, 0)
+    ImageDraw.Draw(mask).text(xy, s, font=f, fill=255)
+    mp = mask.point(lambda v: 255 if v > 127 else 0).load()
+    out = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    ol = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    sh = Image.new("RGBA", img.size, (0, 0, 0, 0))
+    op, olp, shp = out.load(), ol.load(), sh.load()
+    for y in range(H):
+        for x in range(W):
+            if mp[x, y]:
+                op[x, y] = C[shade] if shade and y > xy[1] + size * 0.52 else C[fill]
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        if 0 <= x + dx < W and 0 <= y + dy < H:
+                            olp[x + dx, y + dy] = C["K"]
+    for y in range(H):
+        for x in range(W):
+            if olp[x, y][3] and x + 1 < W and y + 2 < H:
+                shp[x + 1, y + 2] = shadow
+    img.alpha_composite(sh)
+    img.alpha_composite(ol)
+    img.alpha_composite(out)
+
+
+def icon_canvas(n):
+    img = Image.new("RGBA", (n, n))
+    space(img)
+    stars(img, random.Random(3), n // 3)
+    planet(img, n + 2, n + 4, n * 0.55)
+    blit(img, "FLAME0", (n - 30) // 2 - 7, n // 2 - 6)
+    blit(img, "SHIP", (n - 30) // 2 + 1, n // 2 - 9)
+    twinkle(img, 5, 5)
+    return img
 
 
 def banner():
-    W, H = 720, 320
-    canvas = vgrad(W, H, OXFORD, DEEP)
-    starfield(canvas, 130, seed=3)
-
-    # rotated PT2 with gameplay, left of centre
-    draw_watch_landscape(canvas, 70, 96, 300, 150)
-    rotation_hint(canvas, 150, 292)
-
-    d = ImageDraw.Draw(canvas)
-    title_font = ImageFont.truetype(FONT_PATH, 66)
-    sub_font = ImageFont.truetype(FONT_PATH, 21)
-    small_font = ImageFont.truetype(FONT_PATH, 18)
-
-    tx = 418
-    d.text((tx, 74), "PBL-7", font=title_font, fill=GREEN)
-    d.text((tx, 150), "PEBBLONIAN EXPLORER", font=sub_font, fill=WHITE)
-    d.text((tx, 184), "Deliver the Time Core", font=small_font, fill=(0xFF, 0xCC, 0x55, 255))
-    d.text((tx, 206), "to Earth.", font=small_font, fill=(0xFF, 0xCC, 0x55, 255))
-    d.text((tx, 250), "Hold your watch sideways", font=small_font, fill=(0xAA, 0xDD, 0xFF, 255))
-    d.text((tx, 272), "for a landscape shmup.", font=small_font, fill=(0xAA, 0xDD, 0xFF, 255))
-
-    return canvas
+    W, H = 180, 80
+    img = Image.new("RGBA", (W, H))
+    space(img)
+    stars(img, random.Random(7), 90)
+    planet(img, 176, 92, 46)
+    for (x, y) in ((110, 6), (136, 46), (122, 72), (64, 4)):
+        twinkle(img, x, y)
+    # Mercury's champion, in its in-game colours, with its corona
+    C["1"], C["2"], C["3"] = (0xFF, 0xAA, 0x55, 255), (0xFF, 0x55, 0x00, 255), (0xAA, 0x55, 0x00, 255)
+    corona(img, 158, 30, 26)
+    blit(img, "BOSS0", 137, 9)
+    blit(img, "FLAME0", 100, 30)
+    blit(img, "SHIP", 107, 24)
+    stamp(img, BOLT, 132, 33)
+    blit(img, "FIGHTER0", 118, 52)
+    blit(img, "DRONE0", 112, 4)
+    text(img, (6, 3), "PBL-7", 30, "E", "e")
+    text(img, (8, 38), "PEBBLONIAN EXPLORER", 8, "W")
+    text(img, (8, 51), "Deliver the Time Core!", 8, "Y")
+    text(img, (8, 65), "Hold your watch sideways.", 8, "C")
+    return img
 
 
 def main():
     os.makedirs("store", exist_ok=True)
-    for sz in (80, 144):
-        store_icon(sz).save("store/icon-%d.png" % sz)
-        print("wrote store/icon-%d.png (%dx%d)" % (sz, sz, sz))
-    banner().save("store/banner-720x320.png")
-    print("wrote store/banner-720x320.png (720x320)")
+    icon_canvas(40).resize((80, 80), Image.NEAREST).save("store/icon-80.png")
+    icon_canvas(36).resize((144, 144), Image.NEAREST).save("store/icon-144.png")
+    banner().resize((720, 320), Image.NEAREST).save("store/banner-720x320.png")
+    print("wrote store/icon-80.png, icon-144.png, banner-720x320.png")
 
 
 if __name__ == "__main__":

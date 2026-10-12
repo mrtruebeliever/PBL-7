@@ -1,6 +1,8 @@
 # PBL-7
 
-A landscape shoot-'em-up for the Pebble Time 2 (emery).
+A landscape shoot-'em-up for the Pebble Time 2 (emery), also built for the
+round Pebble Round 2 (gabbro), where the watch is held normally: a round screen
+looks the same either way up.
 
 **Hold the watch sideways** — a quarter turn clockwise, so the three buttons
 line up along the bottom and the screen becomes a 228×200 landscape playfield.

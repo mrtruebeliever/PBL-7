@@ -34,11 +34,13 @@ FEATURES
   Settings for easy mode.
 • Settings: backlight, weapon jam (easy mode), rumble, sound, reset save.
 • Made for the Pebble Time 2 (Emery) colour screen; plays entirely offline.
+• Also plays on the round Pebble Round 2 (Gabbro). A round screen looks the
+  same in any orientation, so there you hold the watch normally; no sound.
 • Available in English, Nederlands, Français, Deutsch and Español, following
   your watch's system language automatically.
 • Progress, records and collectibles saved on the watch.
 
 **Category:** Games
 **Icons:** store/icon-80.png, store/icon-144.png
-**Screenshots:** store/screenshots/
+**Screenshots:** store/screenshots/ (Round 2: store/screenshots/gabbro/)
 **Demo:** store/pbl7-demo.gif

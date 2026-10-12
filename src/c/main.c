@@ -1,5 +1,6 @@
 #include <pebble.h>
 #include "font_data.h"
+#include "sprites.h"
 
 // ---------------------------------------------------------------------------
 // PBL-7 — landscape sidescroll shmup for Pebble Time 2 (emery).
@@ -14,9 +15,11 @@
 #define TICK_MS 33
 #define FP 8
 
-#define SHIP_U 36
+#define SHIP_U PBL_IF_ROUND_ELSE(62, 36)
 #define SHIP_R 7
-#define HUD_V 14
+#define HUD_V PBL_IF_ROUND_ELSE(36, 14)   // round: the HUD sits lower, inside the circle
+// Round: the playfield stops short of the bottom of the circle.
+#define FIELD_BOTTOM_PAD PBL_IF_ROUND_ELSE(24, 0)
 
 #define MAX_STARS 30
 #define MAX_PB 12
@@ -69,9 +72,20 @@ static int approach_ticks_for(int planet) {
 // Landscape -> native helpers. s_native_h is the real screen height, cached in
 // window_load: everything else in this file derives from layer_get_bounds(), and
 // these two were the only place a 228 was baked in.
+//
+// Round (gabbro): a round screen looks the same in any orientation, so the
+// watch is not turned there -- the mapping is plain (u = x, v = y), and UP is
+// still the button that rises. Menus draw into a centred 200x200 square
+// (s_ou/s_ov offset) so their corners stay inside the circle.
 static int16_t s_native_h = 228;
+static int16_t s_ou, s_ov;
+#if PBL_ROUND
+static GRect ls(int u, int v, int w, int h) { return GRect(u + s_ou, v + s_ov, w, h); }
+static GPoint lp(int u, int v) { return GPoint(u + s_ou, v + s_ov); }
+#else
 static GRect ls(int u, int v, int w, int h) { return GRect(v, s_native_h - u - w, h, w); }
 static GPoint lp(int u, int v) { return GPoint(v, s_native_h - u - 1); }
+#endif
 
 typedef enum {
   ST_TITLE, ST_MAP, ST_PLAYING, ST_PAUSED, ST_UPGRADE, ST_GAMEOVER, ST_VICTORY,
@@ -672,7 +686,8 @@ static void begin_phase_playing(void) {
 
 static void start_planet(int idx) {
   GRect b = layer_get_bounds(s_layer);
-  s_wls = b.size.h; s_hls = b.size.w; s_native_h = b.size.h;
+  s_wls = b.size.h; s_hls = b.size.w - FIELD_BOTTOM_PAD; s_native_h = b.size.h;
+  s_ou = s_ov = 0;
   if (idx == P_PLUTO) s_portal = false;   // the reveal has served its purpose
   s_planet = idx;
   s_hp_max = HP_MAX_BASE + s_hp_bonus;
@@ -842,7 +857,7 @@ static void kill_enemy(Enemy *e) {
 
 static void fire_player(void) {
   for (int i = 0; i < MAX_PB; i++)
-    if (!s_pb[i].on) { s_pb[i].on = true; s_pb[i].u_fp = (SHIP_U + 10) << FP; s_pb[i].v = s_ship_v_fp >> FP; sfx_shoot(); return; }
+    if (!s_pb[i].on) { s_pb[i].on = true; s_pb[i].u_fp = (SHIP_U + 13) << FP; s_pb[i].v = s_ship_v_fp >> FP; sfx_shoot(); return; }
 }
 
 static void spawn_enemy(void) {
@@ -1140,7 +1155,8 @@ static void game_tick(void *data) {
   s_timer = app_timer_register(TICK_MS, game_tick, NULL);
   s_tick++;
   GRect b = layer_get_bounds(s_layer);
-  s_wls = b.size.h; s_hls = b.size.w; s_native_h = b.size.h;
+  s_wls = b.size.h; s_hls = b.size.w - FIELD_BOTTOM_PAD; s_native_h = b.size.h;
+  s_ou = s_ov = 0;
 
   ship_physics();
   int16_t sv = s_ship_v_fp >> FP;
@@ -1317,22 +1333,36 @@ static void game_tick(void *data) {
 // ---------------------------------------------------------------------------
 // Drawing
 // ---------------------------------------------------------------------------
+// Pixel-art sprites (tools/sprites.py) are stored as runs of same-coloured
+// pixels; each run is one fill_rect, rotated into native coords by ls().
+// Tint slots (colour index >= SPRITE_TINT) take their colour from tint[].
+static void draw_sprite_tinted(GContext *ctx, const Sprite *spr, int16_t u, int16_t v,
+                               const GColor *tint) {
+  uint8_t cur = 0xFF;
+  for (uint16_t i = 0; i < spr->count; i++) {
+    const SpriteRun *r = &spr->runs[i];
+    if (r->col != cur) {
+      cur = r->col;
+      graphics_context_set_fill_color(ctx, (tint && cur >= SPRITE_TINT) ? tint[cur - SPRITE_TINT]
+                                                                       : sprite_palette(cur));
+    }
+    graphics_fill_rect(ctx, ls(u - spr->cx + r->x, v - spr->cy + r->y, r->len, 1), 0, GCornerNone);
+  }
+}
+
+static void draw_sprite(GContext *ctx, const Sprite *spr, int16_t u, int16_t v) {
+  draw_sprite_tinted(ctx, spr, u, v, NULL);
+}
+
 static void draw_ship(GContext *ctx, int16_t u, int16_t v) {
   if (s_state == ST_PLAYING && s_invuln > 0 && (s_tick / 3) % 2 == 0) return;
   if (s_shield > 0) {
     graphics_context_set_stroke_color(ctx, GColorCyan);
-    graphics_draw_circle(ctx, lp(u, v), SHIP_R + 4);
+    graphics_draw_circle(ctx, lp(u, v), SHIP_R + 10);
   }
-  graphics_context_set_fill_color(ctx, GColorMediumSpringGreen);
-  graphics_fill_rect(ctx, ls(u - 8, v - 5, 16, 10), 3, GCornersAll);
-  graphics_context_set_fill_color(ctx, GColorWhite);
-  graphics_fill_rect(ctx, ls(u + 6, v - 3, 5, 6), 2, GCornersRight);
-  graphics_context_set_fill_color(ctx, GColorCyan);
-  graphics_fill_circle(ctx, lp(u + 2, v - 1), 3);
-  if ((s_tick / 2) % 2 == 0) {
-    graphics_context_set_fill_color(ctx, GColorOrange);
-    graphics_fill_rect(ctx, ls(u - 13, v - 2, 5, 4), 1, GCornersLeft);
-  }
+  draw_sprite(ctx, (s_tick / 2) % 2 == 0 ? &SPR_FLAME0 : &SPR_FLAME1,
+              u - SPR_SHIP.cx, v);
+  draw_sprite(ctx, &SPR_SHIP, u, v);
 }
 
 static void draw_pebble_icon(GContext *ctx, int16_t u, int16_t v, bool filled) {
@@ -1346,97 +1376,63 @@ static void draw_pebble_icon(GContext *ctx, int16_t u, int16_t v, bool filled) {
 
 static void draw_enemy(GContext *ctx, Enemy *e) {
   int16_t u = e->u_fp >> FP, v = e->v_fp >> FP;
+  bool f = ((s_tick + (uint32_t)e->base_v) / 4) % 2;
   switch (e->kind) {
-    case EN_DRONE:
-      graphics_context_set_fill_color(ctx, GColorLightGray);
-      graphics_fill_circle(ctx, lp(u, v), 5);
-      graphics_context_set_fill_color(ctx, GColorDarkGray);
-      graphics_fill_circle(ctx, lp(u, v), 2);
-      break;
-    case EN_FIGHTER:
-      graphics_context_set_fill_color(ctx, GColorRed);
-      graphics_fill_rect(ctx, ls(u - 7, v - 4, 13, 8), 2, GCornersAll);
-      graphics_context_set_fill_color(ctx, GColorDarkCandyAppleRed);
-      graphics_fill_rect(ctx, ls(u - 10, v - 2, 4, 4), 1, GCornersLeft);
-      graphics_context_set_fill_color(ctx, GColorYellow);
-      graphics_fill_circle(ctx, lp(u + 1, v), 2);
-      break;
-    case EN_MINE:
-      graphics_context_set_stroke_color(ctx, GColorYellow);
-      for (int a = 0; a < TRIG_MAX_ANGLE; a += TRIG_MAX_ANGLE / 8) {
-        int16_t sx = sin_lookup(a) * 10 / TRIG_MAX_RATIO;
-        int16_t sy = -cos_lookup(a) * 10 / TRIG_MAX_RATIO;
-        graphics_draw_line(ctx, lp(u, v), lp(u + sx, v + sy));
-      }
-      graphics_context_set_fill_color(ctx, GColorChromeYellow);
-      graphics_fill_circle(ctx, lp(u, v), 5);
-      graphics_context_set_fill_color(ctx, GColorBlack);
-      graphics_fill_circle(ctx, lp(u, v), 2);
-      break;
-    case EN_TURRET:
-      graphics_context_set_fill_color(ctx, GColorLightGray);
-      graphics_fill_rect(ctx, ls(u - 8, v - 8, 16, 16), 2, GCornersAll);
-      graphics_context_set_fill_color(ctx, GColorDarkGray);
-      graphics_fill_rect(ctx, ls(u - 12, v - 2, 6, 4), 0, GCornerNone);   // barrel (points left)
-      graphics_context_set_fill_color(ctx, GColorRed);
-      graphics_fill_circle(ctx, lp(u, v), 3);
-      break;
+    case EN_DRONE:   draw_sprite(ctx, f ? &SPR_DRONE1 : &SPR_DRONE0, u, v); break;
+    case EN_FIGHTER: draw_sprite(ctx, (s_tick / 2) % 2 ? &SPR_FIGHTER1 : &SPR_FIGHTER0, u, v); break;
+    case EN_MINE:    draw_sprite(ctx, (s_tick / 6) % 2 ? &SPR_MINE1 : &SPR_MINE0, u, v); break;
+    case EN_TURRET:  draw_sprite(ctx, &SPR_TURRET, u, v); break;
     case EN_COLLECT: {
       GColor g = ((s_tick / 4) % 2) ? GColorWhite : GColorCyan;
       graphics_context_set_stroke_color(ctx, g);
-      graphics_draw_circle(ctx, lp(u, v), 8);
-      draw_pebble_icon(ctx, u, v, true);
+      graphics_draw_circle(ctx, lp(u, v), 10);
+      draw_sprite(ctx, &SPR_COLLECT, u, v);
       break;
     }
-    case EN_ACID: {
-      // bubbling toxic cloud
-      graphics_context_set_fill_color(ctx, GColorSpringBud);
-      graphics_fill_circle(ctx, lp(u, v), 11);
-      graphics_context_set_fill_color(ctx, GColorGreen);
-      int16_t wob = sin_lookup(e->phase) * 3 / TRIG_MAX_RATIO;
-      graphics_fill_circle(ctx, lp(u + wob, v - 4), 6);
-      graphics_fill_circle(ctx, lp(u - 4, v + 5 + wob), 5);
-      graphics_context_set_fill_color(ctx, GColorIslamicGreen);
-      graphics_fill_circle(ctx, lp(u, v), 4);
-      break;
-    }
+    case EN_ACID:    draw_sprite(ctx, (s_tick / 8) % 2 ? &SPR_ACID1 : &SPR_ACID0, u, v); break;
     default: break;
   }
 }
+
+// Each planet's champion wears its colours (light, mid, dark); an
+// overheated boss glows red.
+#define TINT3(a, b, c) { {.argb = a}, {.argb = b}, {.argb = c} }
+static const GColor BOSS_TINT[NUM_PLANETS][3] = {
+  TINT3(GColorRajahARGB8,       GColorOrangeARGB8,        GColorWindsorTanARGB8),         // Mercury
+  TINT3(GColorSpringBudARGB8,   GColorLimerickARGB8,      GColorArmyGreenARGB8),          // Venus
+  TINT3(GColorSunsetOrangeARGB8, GColorRedARGB8,          GColorDarkCandyAppleRedARGB8),  // Mars
+  TINT3(GColorRajahARGB8,       GColorWindsorTanARGB8,    GColorBulgarianRoseARGB8),      // Jupiter
+  TINT3(GColorIcterineARGB8,    GColorChromeYellowARGB8,  GColorWindsorTanARGB8),         // Saturn
+  TINT3(GColorCelesteARGB8,     GColorCyanARGB8,          GColorTiffanyBlueARGB8),        // Uranus
+  TINT3(GColorVeryLightBlueARGB8, GColorBlueMoonARGB8,    GColorDukeBlueARGB8),           // Neptune
+  TINT3(GColorRichBrilliantLavenderARGB8, GColorPurpleARGB8, GColorImperialPurpleARGB8),  // Pluto
+  TINT3(GColorInchwormARGB8,    GColorIslamicGreenARGB8,  GColorDarkGreenARGB8),          // Rebble
+  TINT3(GColorWhiteARGB8,       GColorLightGrayARGB8,     GColorDarkGrayARGB8),           // Moon
+  TINT3(GColorPictonBlueARGB8,  GColorVividCeruleanARGB8, GColorCobaltBlueARGB8),         // Earth
+};
+static const GColor BOSS_HOT[3] =
+  TINT3(GColorMelonARGB8, GColorRedARGB8, GColorDarkCandyAppleRedARGB8);
 
 static void draw_boss(GContext *ctx) {
   int16_t u = s_boss_u_fp >> FP, v = s_boss_v_fp >> FP;
   int p = s_planet;
 
-  if (p == 0) {   // Mercury: blazing sun with a corona
-    graphics_context_set_stroke_color(ctx, GColorChromeYellow);
+  if (p == 0) {   // Mercury: a blazing corona behind the Solar Sentinel
+    graphics_context_set_stroke_color(ctx, (s_tick / 3) % 2 ? GColorChromeYellow : GColorYellow);
     for (int a = 0; a < TRIG_MAX_ANGLE; a += TRIG_MAX_ANGLE / 12) {
-      int16_t sx = sin_lookup(a) * 24 / TRIG_MAX_RATIO;
-      int16_t sy = -cos_lookup(a) * 24 / TRIG_MAX_RATIO;
+      int16_t sx = sin_lookup(a) * 27 / TRIG_MAX_RATIO;
+      int16_t sy = -cos_lookup(a) * 27 / TRIG_MAX_RATIO;
       graphics_draw_line(ctx, lp(u, v), lp(u + sx, v + sy));
     }
-    graphics_context_set_fill_color(ctx, s_boss_over ? GColorRed : GColorOrange);
-    graphics_fill_circle(ctx, lp(u, v), 18);
-    graphics_context_set_fill_color(ctx, GColorChromeYellow);
-    graphics_fill_circle(ctx, lp(u, v), 12);
-  } else {
-    // Generic themed core: outer body in accent, inner in planet colour
-    graphics_context_set_fill_color(ctx, s_boss_over ? GColorRed : PLANETS[p].accent);
-    graphics_fill_circle(ctx, lp(u, v), 18);
-    graphics_context_set_fill_color(ctx, PLANETS[p].planet);
-    graphics_fill_circle(ctx, lp(u, v), 11);
   }
-
-  // angry eyes
-  graphics_context_set_fill_color(ctx, GColorBlack);
-  graphics_fill_circle(ctx, lp(u - 4, v - 5), 2);
-  graphics_fill_circle(ctx, lp(u - 4, v + 5), 2);
+  draw_sprite_tinted(ctx, (s_tick / 10) % 3 == 0 ? &SPR_BOSS1 : &SPR_BOSS0, u, v,
+                     s_boss_over ? BOSS_HOT : BOSS_TINT[p]);
 
   // Mars: energy shield while its drones live
   if (p == 2 && s_boss_shield) {
     graphics_context_set_stroke_color(ctx, ((s_tick / 3) % 2) ? GColorCyan : GColorCeleste);
+    graphics_draw_circle(ctx, lp(u, v), 26);
     graphics_draw_circle(ctx, lp(u, v), 24);
-    graphics_draw_circle(ctx, lp(u, v), 22);
   }
 }
 
@@ -1446,12 +1442,15 @@ static void draw_hud(GContext *ctx) {
   graphics_fill_rect(ctx, ls(0, 0, W, HUD_V), 0, GCornerNone);
 
   char buf[24];
+  // Round: the HUD row sits low in the black cap, inset from the rim.
+  const int16_t hu = PBL_IF_ROUND_ELSE(50, 0), hv = PBL_IF_ROUND_ELSE(20, 0);
+  s_ov = hv;
   // lives at the far left
   snprintf(buf, sizeof(buf), "x%d", s_lives < 0 ? 0 : s_lives);
-  draw_text_ls(ctx, buf, 6, 2, false, GColorWhite);
+  draw_text_ls(ctx, buf, 6 + hu, 2, false, GColorWhite);
 
   // HP bar (after the lives)
-  int16_t hpx = 28, hpw = 56;
+  int16_t hpx = 28 + hu, hpw = PBL_IF_ROUND_ELSE(40, 56);
   graphics_context_set_fill_color(ctx, GColorDarkGray);
   graphics_fill_rect(ctx, ls(hpx, 3, hpw, 5), 0, GCornerNone);
   int16_t fill = s_hp_max > 0 ? hpw * s_hp / s_hp_max : 0;
@@ -1471,7 +1470,7 @@ static void draw_hud(GContext *ctx) {
   }
 
   // special meter at the right
-  int16_t sw = 56, sx = W - 6 - sw;
+  int16_t sw = PBL_IF_ROUND_ELSE(40, 56), sx = W - 6 - hu - sw;
   graphics_context_set_fill_color(ctx, GColorDarkGray);
   graphics_fill_rect(ctx, ls(sx, 3, sw, 7), 0, GCornerNone);
   bool full = s_special >= SPECIAL_MAX;
@@ -1482,13 +1481,14 @@ static void draw_hud(GContext *ctx) {
   // score centred in the gap between the HP bar and the special meter
   snprintf(buf, sizeof(buf), "%ld", (long)s_score);
   draw_text_center(ctx, buf, (hpx + hpw + sx) / 2, 2, false, GColorWhite);
+  s_ov = 0;
 }
 
 static void draw_boss_bar(GContext *ctx) {
   int16_t W = s_wls;
   const char *nm = PLANETS[s_planet].boss;
   draw_text_center(ctx, nm, W / 2, HUD_V + 2, false, GColorWhite);
-  int16_t bw = W - 40, bx = 20, by = HUD_V + 16;
+  int16_t bx = PBL_IF_ROUND_ELSE(40, 20), bw = W - 2 * bx, by = HUD_V + 16;
   graphics_context_set_fill_color(ctx, GColorDarkGray);
   graphics_fill_rect(ctx, ls(bx, by, bw, 5), 0, GCornerNone);
   graphics_context_set_fill_color(ctx, s_boss_over ? GColorRed : GColorOrange);
@@ -1497,6 +1497,7 @@ static void draw_boss_bar(GContext *ctx) {
 
 static void draw_game(GContext *ctx, GRect b) {
   int16_t W = b.size.h, H = b.size.w;
+  s_ou = s_ov = 0;
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
 
@@ -1578,7 +1579,7 @@ static void draw_game(GContext *ctx, GRect b) {
   // weapon jam warning near the ship
   if (s_jam > 0 && (s_tick / 2) % 2 == 0) {
     int16_t jv = s_ship_v_fp >> FP;
-    draw_text_ls(ctx, "JAM", SHIP_U + 12, jv - 4, false, GColorRed);
+    draw_text_ls(ctx, "JAM", SHIP_U + 18, jv - 4, false, GColorRed);
   }
 
   // Mercury phase-2 overheat: shimmering orange haze (reduced visibility)
@@ -1629,8 +1630,17 @@ static void draw_game(GContext *ctx, GRect b) {
   }
 }
 
+// Menu screens: on round, a centred 200x200 square; else the full landscape.
+static void menu_frame(GRect b, int16_t *W, int16_t *H) {
+  const int16_t m = PBL_IF_ROUND_ELSE(30, 0);
+  s_ou = s_ov = m;
+  *W = b.size.h - 2 * m; *H = b.size.w - 2 * m;
+  s_wls = *W; s_hls = *H;
+}
+
 static void draw_map(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
   s_wls = W; s_hls = H;
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
@@ -1672,7 +1682,8 @@ static void draw_map(GContext *ctx, GRect b) {
 }
 
 static void draw_upgrade(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   draw_text_center(ctx, S(S_CHOOSE_UP), W / 2, 6, false, GColorChromeYellow);
@@ -1695,7 +1706,9 @@ static void draw_upgrade(GContext *ctx, GRect b) {
 }
 
 static void draw_title(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
+  s_ov -= PBL_IF_ROUND_ELSE(8, 0);   // the title page is tall: use more of the circle
   s_wls = W; s_hls = H;
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
@@ -1710,16 +1723,23 @@ static void draw_title(GContext *ctx, GRect b) {
   draw_ship(ctx, W / 2, y + 24);
   draw_text_center(ctx, S(S_START), W / 2, y + 42, false, GColorCyan);
   draw_text_center(ctx, S(S_TITLE_SETTINGS), W / 2, y + 58, false, GColorLightGray);
-  draw_text_center(ctx, S(S_HINT_FLY), W / 2, H - 32, false, GColorLightGray);
-  draw_text_center(ctx, S(S_HINT_BOMB), W / 2, H - 18, false, GColorLightGray);
+  const int16_t lift = PBL_IF_ROUND_ELSE(4, 0);   // round: away from the narrowing rim
+  draw_text_center(ctx, S(S_HINT_FLY), W / 2, H - 32 - lift, false, GColorLightGray);
+  draw_text_center(ctx, S(S_HINT_BOMB), W / 2, H - 18 - lift, false, GColorLightGray);
 
   char bb[24];
   snprintf(bb, sizeof(bb), S(S_BEST), (long)s_best_score);
+#if PBL_ROUND
+  draw_text_center(ctx, bb, W / 2, 0, false, GColorLightGray);
+#else
   draw_text_ls(ctx, bb, 6, 2, false, GColorLightGray);
+#endif
 }
 
 static void draw_gameover(GContext *ctx, GRect b) {
-  int16_t W = b.size.h;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
+  (void)H;
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   draw_text_center(ctx, S(S_GAMEOVER), W / 2, 40, true, GColorRed);
@@ -1736,7 +1756,8 @@ static void draw_collect_gallery(GContext *ctx, int16_t W, int16_t v) {
 }
 
 static void draw_victory(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   graphics_context_set_fill_color(ctx, GColorVividCerulean);   // Earth
@@ -1755,7 +1776,8 @@ static void draw_victory(GContext *ctx, GRect b) {
 }
 
 static void draw_secret_ending(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
   graphics_context_set_fill_color(ctx, GColorBlack);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   // magical shimmer border
@@ -1781,7 +1803,8 @@ static void reset_save(void) {
 }
 
 static void draw_settings(GContext *ctx, GRect b) {
-  int16_t W = b.size.h, H = b.size.w;
+  int16_t W, H;
+  menu_frame(b, &W, &H);
   graphics_context_set_fill_color(ctx, GColorOxfordBlue);
   graphics_fill_rect(ctx, b, 0, GCornerNone);
   draw_text_center_fit(ctx, S(S_SETTINGS), W / 2, 8, GColorChromeYellow);
@@ -1821,7 +1844,7 @@ static void draw_settings(GContext *ctx, GRect b) {
       }
     }
   }
-  draw_text_center(ctx, S(S_SET_HINT), W / 2, H - 14, false, GColorLightGray);
+  draw_text_center(ctx, S(S_SET_HINT), W / 2, H - 14 - PBL_IF_ROUND_ELSE(10, 0), false, GColorLightGray);
 }
 
 static void layer_update(Layer *layer, GContext *ctx) {
@@ -1963,6 +1986,7 @@ static void focus_handler(bool in_focus) {
 static void window_load(Window *window) {
   Layer *root = window_get_root_layer(window);
   s_layer = layer_create(layer_get_bounds(root));
+  s_native_h = layer_get_bounds(root).size.h;
   layer_set_update_proc(s_layer, layer_update);
   layer_add_child(root, s_layer);
 }
